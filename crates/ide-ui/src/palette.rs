@@ -248,7 +248,7 @@ pub fn render_session_password(
                 .add_modifier(Modifier::BOLD),
         ))
         .title_bottom(Line::from(Span::styled(
-            " Enter connect · Esc cancel ",
+            " Tab remember · Enter connect · Esc cancel ",
             theme::style_faint(),
         )));
     let inner = block.inner(area);
@@ -281,13 +281,58 @@ pub fn render_session_password(
                     .fg(theme::accent())
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("remember password  (Space toggle)", theme::style_muted()),
+            Span::styled("remember password  (Tab toggle)", theme::style_muted()),
         ]),
         Line::from(""),
         Line::from(Span::styled(
             "  case-sensitive · sshpass · Enter empty = use saved",
             theme::style_faint(),
         )),
+    ];
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+pub fn render_confirm_delete(frame: &mut Frame, screen: Rect, profile_label: &str) {
+    let area = centered(screen, screen.width.clamp(44, 62), 9);
+    scrim(frame, screen, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(theme::danger()))
+        .style(Style::default().bg(theme::modal()))
+        .title(Span::styled(
+            " Delete profile ",
+            Style::default()
+                .fg(theme::danger())
+                .add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let lines = vec![
+        Line::from(Span::styled(
+            format!("  Delete \u{201c}{profile_label}\u{201d}?"),
+            Style::default()
+                .fg(theme::text())
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Removes it from sessions.toml. Live tabs stay open.",
+            theme::style_muted(),
+        )),
+        Line::from(Span::styled(
+            "  Saved password is kept until cleared from the palette.",
+            theme::style_faint(),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Enter/y", theme::style_pill_off()),
+            Span::styled(" delete   ", theme::style_faint()),
+            Span::styled("Esc/n", theme::style_pill_off()),
+            Span::styled(" cancel", theme::style_faint()),
+        ]),
     ];
     frame.render_widget(Paragraph::new(lines), inner);
 }

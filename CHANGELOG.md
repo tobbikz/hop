@@ -3,6 +3,21 @@
 All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project follows [Semantic Versioning](https://semver.org/).
 
+## [0.6.1] - 2026-11-15
+
+### Changed
+
+- SSH PTY now receives every key except `Ctrl-\`` / `F12` (vim, readline and tmux work normally); tab actions live in the profile list.
+- Profile rows lead with the name and target, with connected/failed dots; kind is only shown for RDP.
+- Status line auto-clears after 4 seconds and uses success/error icons.
+- Single locked AMOLED theme with improved faint-text contrast and one-column PTY padding.
+
+### Fixed
+
+- Deleting a profile asks for confirmation (`Enter`/`y` deletes, `Esc`/`n` cancels).
+- Password fields accept spaces; `Tab` toggles "remember".
+- SSH tab titles use the profile name (no `[[ssh] …]`), and the profile count is pluralized.
+
 ## [0.6.0] - 2026-11-15
 
 ### Added

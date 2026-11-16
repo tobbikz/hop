@@ -17,7 +17,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use std::io::{self, Stdout};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub struct App {
     ui: UiState,
@@ -25,6 +25,7 @@ pub struct App {
     config: IdeConfig,
     cwd: PathBuf,
     should_quit: bool,
+    status_at: Option<Instant>,
 }
 
 impl App {
@@ -47,6 +48,7 @@ impl App {
             config,
             cwd,
             should_quit: false,
+            status_at: None,
         };
         app.set_status(
             "Sessions · Enter connect · a SSH · A RDP · e edit · x del",
@@ -60,6 +62,16 @@ impl App {
             text: text.into(),
             error,
         });
+        self.status_at = Some(Instant::now());
+    }
+
+    fn expire_status(&mut self) {
+        if let Some(at) = self.status_at {
+            if at.elapsed() >= Duration::from_secs(4) {
+                self.ui.status = None;
+                self.status_at = None;
+            }
+        }
     }
 
     fn handle_event(&mut self, event: Event, term_rows: u16) -> Result<()> {
@@ -72,7 +84,9 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent, term_rows: u16) -> Result<()> {
-        if key.modifiers.contains(KeyModifiers::CONTROL)
+        let in_pty = self.ui.mode == Mode::Normal && self.ui.focus == Focus::Terminal;
+        if !in_pty
+            && key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q'))
         {
             self.should_quit = true;
@@ -82,6 +96,7 @@ impl App {
             Mode::Palette => self.handle_palette_key(key, term_rows)?,
             Mode::SessionForm => self.handle_form_key(key)?,
             Mode::SessionPassword => self.handle_password_key(key, term_rows)?,
+            Mode::ConfirmDelete => self.handle_confirm_key(key),
             Mode::Normal => {
                 if self.ui.focus == Focus::Terminal {
                     self.handle_terminal_key(key)?;
@@ -160,7 +175,7 @@ impl App {
             KeyCode::Backspace => {
                 self.ui.session_password_input.pop();
             }
-            KeyCode::Char(' ') => {
+            KeyCode::Tab | KeyCode::BackTab => {
                 self.ui.session_password_remember = !self.ui.session_password_remember;
                 let mark = if self.ui.session_password_remember {
                     "remember ON"
@@ -193,10 +208,14 @@ impl App {
                 }
                 Err(e) => self.set_status(e.to_string(), true),
             },
-            KeyCode::Char('x') | KeyCode::Delete => match self.sessions.delete_selected() {
-                Ok(()) => self.set_status("profile deleted", false),
-                Err(e) => self.set_status(e.to_string(), true),
-            },
+            KeyCode::Char('x') | KeyCode::Delete => {
+                if self.sessions.selected_profile().is_some() {
+                    self.ui.show_discover = false;
+                    self.ui.mode = Mode::ConfirmDelete;
+                } else {
+                    self.set_status("no profile selected", true);
+                }
+            }
             KeyCode::Char(']') => self.next_ssh_tab(),
             KeyCode::Char('[') => self.prev_ssh_tab(),
             KeyCode::Char('w') => self.close_ssh_tab(),
@@ -213,25 +232,49 @@ impl App {
     }
 
     fn handle_terminal_key(&mut self, key: KeyEvent) -> Result<()> {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        match key.code {
-            KeyCode::Esc if !ctrl => self.focus_profiles(),
-            KeyCode::Char('`') if ctrl => self.focus_profiles(),
-            KeyCode::Char(']') if ctrl => self.next_ssh_tab(),
-            KeyCode::Char('[') if ctrl => self.prev_ssh_tab(),
-            KeyCode::Char('w') if ctrl => self.close_ssh_tab(),
-            KeyCode::Char('p') if ctrl => self.open_palette(),
-            _ => self.forward_key(key)?,
+        // Single host escape hatch: every other key belongs to the remote PTY
+        // (Esc, Ctrl-[, Ctrl-W and Ctrl-P are used by vim/readline/tmux).
+        let host_escape = matches!(key.code, KeyCode::F(12))
+            || (key.modifiers.contains(KeyModifiers::CONTROL)
+                && matches!(key.code, KeyCode::Char('`')));
+        if host_escape {
+            self.focus_profiles();
+        } else {
+            self.forward_key(key)?;
         }
         Ok(())
     }
 
+    fn handle_confirm_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                match self.sessions.delete_selected() {
+                    Ok(()) => self.set_status("profile deleted", false),
+                    Err(e) => self.set_status(e.to_string(), true),
+                }
+                self.ui.mode = Mode::Normal;
+                self.ui.focus = Focus::Sessions;
+            }
+            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                self.ui.mode = Mode::Normal;
+                self.ui.focus = Focus::Sessions;
+                self.set_status("delete cancelled", false);
+            }
+            _ => {}
+        }
+    }
+
     fn focus_profiles(&mut self) {
         self.ui.focus = Focus::Sessions;
-        self.set_status("profiles · Enter connect · Ctrl-] tabs", false);
+        self.ui.show_discover = false;
+        self.set_status(
+            "profiles · Enter connect · ]/[ tabs · Ctrl-P palette",
+            false,
+        );
     }
 
     fn open_palette(&mut self) {
+        self.ui.show_discover = false;
         self.ui.mode = Mode::Palette;
         self.ui.palette = Palette::open_commands();
     }
@@ -248,6 +291,7 @@ impl App {
     }
 
     fn begin_add(&mut self, ssh: bool) {
+        self.ui.show_discover = false;
         self.sessions.begin_add(ssh);
         self.ui.session_form_field = 0;
         self.ui.mode = Mode::SessionForm;
@@ -300,10 +344,13 @@ impl App {
                 }
                 Err(e) => self.set_status(e.to_string(), true),
             },
-            "delete" => match self.sessions.delete_selected() {
-                Ok(()) => self.set_status("profile deleted", false),
-                Err(e) => self.set_status(e.to_string(), true),
-            },
+            "delete" => {
+                if self.sessions.selected_profile().is_some() {
+                    self.ui.mode = Mode::ConfirmDelete;
+                } else {
+                    self.set_status("no profile selected", true);
+                }
+            }
             "next_tab" => self.next_ssh_tab(),
             "prev_tab" => self.prev_ssh_tab(),
             "close_tab" => self.close_ssh_tab(),
@@ -371,21 +418,27 @@ impl App {
                 let rows = term_rows.max(6);
                 match self.sessions.connect_selected(&self.cwd, cols, rows) {
                     Ok(ConnectOutcome::RdpSpawned { label }) => {
+                        self.sessions.clear_failed(&profile.id);
+                        self.ui.show_discover = false;
                         self.set_status(format!("rdp launched · {label}"), false);
                     }
                     Ok(ConnectOutcome::SshAttached { .. }) => {}
-                    Err(e) => self.set_status(format!("session: {e}"), true),
+                    Err(e) => {
+                        self.sessions.mark_failed(&profile.id);
+                        self.set_status(format!("session: {e}"), true);
+                    }
                 }
             }
             SessionKind::Ssh => {
+                self.ui.show_discover = false;
                 self.ui.session_password_profile_id = Some(profile.id.clone());
                 self.ui.session_password_input.clear();
                 self.ui.session_password_remember = true;
                 self.ui.mode = Mode::SessionPassword;
                 let hint = if ide_sessions::has_password(&profile.id) {
-                    "password · Enter = saved · Space remember · type to replace"
+                    "password · Enter = saved · Tab remember · type to replace"
                 } else {
-                    "password · Enter connect · Space toggle remember"
+                    "password · Enter connect · Tab remember"
                 };
                 self.set_status(hint, false);
             }
@@ -425,6 +478,8 @@ impl App {
             .connect_selected_with_password(&self.cwd, cols, rows, password.clone())
         {
             Ok(ConnectOutcome::SshAttached { label }) => {
+                self.sessions.clear_failed(&profile_id);
+                self.ui.show_discover = false;
                 self.ui.focus = Focus::Terminal;
                 self.ui.session_password_input.clear();
                 self.ui.mode = Mode::Normal;
@@ -439,6 +494,7 @@ impl App {
                     || snap.contains("connection refused")
                     || snap.contains("authentication failed");
                 if failed {
+                    self.sessions.mark_failed(&profile_id);
                     let _ = ide_sessions::clear_password(&profile_id);
                     self.ui.session_password_input.clear();
                     self.ui.session_password_profile_id = Some(profile_id);
@@ -470,6 +526,7 @@ impl App {
                 self.set_status(format!("rdp launched · {label}"), false);
             }
             Err(e) => {
+                self.sessions.mark_failed(&profile_id);
                 self.ui.mode = Mode::SessionPassword;
                 self.set_status(format!("session: {e}"), true);
             }
@@ -527,6 +584,16 @@ impl App {
     }
 }
 
+fn tab_caption(name: &str) -> String {
+    let count = name.chars().count();
+    if count <= 17 {
+        return name.to_string();
+    }
+    let mut out: String = name.chars().take(16).collect();
+    out.push('…');
+    out
+}
+
 fn function_key(n: u8) -> Option<&'static [u8]> {
     match n {
         1 => Some(b"\x1bOP"),
@@ -577,8 +644,9 @@ async fn event_loop(
 
         let size = terminal.size()?;
         // Header + footer + pane borders ≈ 4 rows; sidebar 34 + borders 2.
+        app.expire_status();
         let term_rows = size.height.saturating_sub(4).max(12);
-        let cols = size.width.saturating_sub(36).max(40);
+        let cols = size.width.saturating_sub(34).max(40);
         app.sessions.reap_rdp();
         if !app.sessions.live_ssh.is_empty() {
             app.sessions.resize_active_ssh(cols, term_rows);
@@ -586,9 +654,9 @@ async fn event_loop(
 
         let labels: Vec<String> = app
             .sessions
-            .live_ssh
+            .ssh_tab_labels()
             .iter()
-            .map(|s| s.label.chars().take(18).collect())
+            .map(|name| tab_caption(name))
             .collect();
         let active = app.sessions.active_ssh;
         let styled = app

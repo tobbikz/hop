@@ -13,6 +13,8 @@ pub enum Mode {
     SessionForm,
     /// SSH password prompt.
     SessionPassword,
+    /// Delete-profile confirmation.
+    ConfirmDelete,
 }
 
 /// Which pane owns keyboard input.

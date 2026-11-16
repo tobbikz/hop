@@ -10,6 +10,7 @@ pub use secrets::{clear_password, get_password, has_password, secrets_file_path,
 use anyhow::{bail, Context, Result};
 use ide_term::TerminalPane;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use uuid::Uuid;
@@ -187,6 +188,8 @@ pub struct SessionManager {
     pub live_ssh: Vec<LiveSsh>,
     pub active_ssh: usize,
     pub live_rdp: Vec<LiveRdp>,
+    /// Runtime-only: profile ids whose last connect attempt failed.
+    pub failed: HashSet<String>,
     pub path: Option<PathBuf>,
     /// Draft fields for add/edit form (S4).
     pub form_name: String,
@@ -223,6 +226,8 @@ impl SessionManager {
         };
         self.path = Some(p.clone());
         self.profiles = load_file(&p)?.profiles;
+        self.failed
+            .retain(|id| self.profiles.iter().any(|p| &p.id == id));
         if self.selected >= self.profiles.len() {
             self.selected = self.profiles.len().saturating_sub(1);
         }
@@ -246,6 +251,28 @@ impl SessionManager {
         }
         std::fs::write(p, text)?;
         Ok(())
+    }
+
+    pub fn mark_failed(&mut self, profile_id: &str) {
+        self.failed.insert(profile_id.to_string());
+    }
+
+    pub fn clear_failed(&mut self, profile_id: &str) {
+        self.failed.remove(profile_id);
+    }
+
+    /// Tab captions use the profile name, not the full `[kind] name — target` label.
+    pub fn ssh_tab_labels(&self) -> Vec<String> {
+        self.live_ssh
+            .iter()
+            .map(|l| {
+                self.profiles
+                    .iter()
+                    .find(|p| p.id == l.profile_id)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| l.label.clone())
+            })
+            .collect()
     }
 
     pub fn move_up(&mut self) {
@@ -332,6 +359,10 @@ impl SessionManager {
     pub fn delete_selected(&mut self) -> Result<()> {
         if self.profiles.is_empty() {
             bail!("no profiles");
+        }
+        if let Some(p) = self.profiles.get(self.selected) {
+            let id = p.id.clone();
+            self.failed.remove(&id);
         }
         self.profiles.remove(self.selected);
         if self.selected >= self.profiles.len() {
@@ -619,6 +650,25 @@ mod tests {
         assert!(args.iter().any(|a| a == "-p"));
         assert!(args.iter().any(|a| a == "2222"));
         assert!(args.ends_with(&["ops@10.0.0.5".into()]));
+    }
+
+    #[test]
+    fn failed_marker_clears_on_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mgr = SessionManager {
+            path: Some(dir.path().join("sessions.toml")),
+            form_kind_ssh: true,
+            form_port: "22".into(),
+            ..Default::default()
+        };
+        let p = SessionProfile::new_ssh("home", "127.0.0.1", "me");
+        let id = p.id.clone();
+        mgr.profiles.push(p);
+        mgr.selected = 0;
+        mgr.mark_failed(&id);
+        assert!(mgr.failed.contains(&id));
+        mgr.delete_selected().unwrap();
+        assert!(!mgr.failed.contains(&id));
     }
 
     #[test]

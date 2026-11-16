@@ -10,8 +10,9 @@ use ide_sessions::SessionManager;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, Padding, Paragraph};
 use ratatui::Frame;
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Debug, Clone)]
 pub struct StatusMessage {
@@ -76,7 +77,7 @@ pub fn render(frame: &mut Frame, ctx: RenderCtx<'_>) {
     render_header(frame, root[0], &ctx);
     let cols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(34), Constraint::Min(24)])
+        .constraints([Constraint::Length(32), Constraint::Min(24)])
         .split(root[1]);
     frame.render_widget(
         Block::default().style(Style::default().bg(theme::bg())),
@@ -125,6 +126,14 @@ pub fn render(frame: &mut Frame, ctx: RenderCtx<'_>) {
                 ctx.ui.session_password_remember,
             );
         }
+        Mode::ConfirmDelete => {
+            let name = ctx
+                .sessions
+                .selected_profile()
+                .map(|p| p.name.clone())
+                .unwrap_or_default();
+            palette::render_confirm_delete(frame, size, &name);
+        }
         Mode::Normal => {}
     }
 }
@@ -132,21 +141,43 @@ pub fn render(frame: &mut Frame, ctx: RenderCtx<'_>) {
 fn render_header(frame: &mut Frame, area: Rect, ctx: &RenderCtx<'_>) {
     let n = ctx.sessions.profiles.len();
     let live = ctx.sessions.live_ssh.len() + ctx.sessions.live_rdp.len();
-    let line = Line::from(vec![
-        Span::styled(" Sessions ", theme::style_selected_strong()),
-        Span::styled(format!(" {n} profiles "), theme::style_muted()),
-        if live > 0 {
-            Span::styled(format!(" · {live} live "), theme::style_accent())
-        } else {
-            Span::styled(" · idle ", theme::style_faint())
-        },
+    let profile_word = if n == 1 { "profile" } else { "profiles" };
+    let state = if live == 0 {
+        "idle".to_string()
+    } else {
+        format!("{live} connected")
+    };
+
+    let mut spans = vec![
         Span::styled(
-            format!(" · {} ", theme::current_label()),
-            theme::style_faint(),
+            " Sessions ",
+            Style::default()
+                .fg(theme::text())
+                .add_modifier(Modifier::BOLD),
         ),
-    ]);
+        Span::styled(format!(" {n} {profile_word} "), theme::style_muted()),
+        Span::styled("· ", theme::style_faint()),
+        Span::styled(
+            format!("{state} "),
+            if live > 0 {
+                theme::style_accent()
+            } else {
+                theme::style_faint()
+            },
+        ),
+    ];
+
+    let left_w: usize = spans.iter().map(|s| s.content.width()).sum();
+    let theme_label = format!("{} ", theme::current_label());
+    let right_w = theme_label.width();
+    let pad = (area.width as usize).saturating_sub(left_w + right_w);
+    if pad >= 2 {
+        spans.push(Span::raw(" ".repeat(pad)));
+        spans.push(Span::styled(theme_label, theme::style_faint()));
+    }
+
     frame.render_widget(
-        Paragraph::new(line).style(Style::default().bg(theme::surface())),
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(theme::surface())),
         area,
     );
 }
@@ -154,14 +185,14 @@ fn render_header(frame: &mut Frame, area: Rect, ctx: &RenderCtx<'_>) {
 fn render_footer(frame: &mut Frame, area: Rect, ctx: &RenderCtx<'_>) {
     let line = match &ctx.ui.status {
         Some(status) => {
-            let style = if status.error {
-                theme::style_err()
+            let (icon, style) = if status.error {
+                (" ! ", theme::style_err())
             } else {
-                theme::style_muted()
+                (" ✓ ", theme::style_ok())
             };
             Line::from(vec![
-                Span::styled(if status.error { " ! " } else { " · " }, style),
-                Span::styled(status.text.clone(), style),
+                Span::styled(icon, style),
+                Span::styled(status.text.clone(), theme::style_text()),
             ])
         }
         None if ctx.ui.show_discover => Line::from(Span::styled(
@@ -169,11 +200,11 @@ fn render_footer(frame: &mut Frame, area: Rect, ctx: &RenderCtx<'_>) {
             theme::style_faint(),
         )),
         None if ctx.ui.focus == Focus::Terminal => Line::from(Span::styled(
-            " typing in SSH  ·  Esc profiles  ·  Ctrl-] next  ·  Ctrl-W close ",
+            " typing in SSH · Ctrl-` / F12 back to profiles · tabs from the list ",
             theme::style_faint(),
         )),
         None => Line::from(Span::styled(
-            " Enter connect  ·  a/A add  ·  e edit  ·  x del  ·  Space discover  ·  Ctrl-P ",
+            " Enter connect · a/A add · e edit · x delete · ]/[ tabs · Space keys · Ctrl-P ",
             theme::style_faint(),
         )),
     };
@@ -185,8 +216,11 @@ fn render_footer(frame: &mut Frame, area: Rect, ctx: &RenderCtx<'_>) {
 
 fn render_profiles(frame: &mut Frame, area: Rect, sessions: &SessionManager, focused: bool) {
     let border = theme::border(focused);
+    let inner_w = area.width.saturating_sub(2) as usize;
     let mut items: Vec<ListItem> = Vec::new();
+
     if sessions.profiles.is_empty() {
+        items.push(ListItem::new(Line::from("")));
         items.push(ListItem::new(Span::styled(
             " No profiles yet",
             theme::style_muted(),
@@ -200,47 +234,88 @@ fn render_profiles(frame: &mut Frame, area: Rect, sessions: &SessionManager, foc
             theme::style_faint(),
         )));
     } else {
-        items.push(ListItem::new(Span::styled(
-            " Enter · a SSH · A RDP · Space ",
-            theme::style_faint(),
-        )));
         for (i, p) in sessions.profiles.iter().enumerate() {
             let selected = i == sessions.selected;
             let live = sessions.live_ssh.iter().any(|l| l.profile_id == p.id)
                 || sessions.live_rdp.iter().any(|l| l.profile_id == p.id);
-            let mark = if live { "▸" } else { " " };
-            let kind = match p.kind {
-                ide_sessions::SessionKind::Ssh => "ssh",
-                ide_sessions::SessionKind::Rdp => "rdp",
+            let failed = sessions.failed.contains(&p.id);
+            let state = if live {
+                "●"
+            } else if failed {
+                "○"
+            } else {
+                " "
             };
+
             let target = if p.user.is_empty() {
                 p.host.clone()
             } else {
                 format!("{}@{}", p.user, p.host)
             };
-            let row = format!("{mark} {}  {kind}  {target}", p.name);
-            let style = if selected {
-                theme::style_selected()
+            let target = if p.kind == ide_sessions::SessionKind::Rdp {
+                format!("rdp · {target}")
             } else {
-                theme::style_text()
+                target
             };
-            let prefix = if selected {
-                Span::styled("▎", Style::default().fg(theme::accent()))
+
+            // prefix + space + name + pad + target + gap + dot
+            let fixed = 1 + 1 + 2 + 1;
+            let avail = inner_w.saturating_sub(fixed);
+            let name = truncate(&p.name, (avail * 45 / 100).max(4));
+            let name_w = name.width();
+            let target = truncate(&target, avail.saturating_sub(name_w));
+            let used = 1 + 1 + name_w + target.width() + 2 + 1;
+            let pad = inner_w.saturating_sub(used);
+
+            let row_bg = if selected {
+                if focused {
+                    theme::surface_3()
+                } else {
+                    theme::surface_2()
+                }
             } else {
-                Span::styled(" ", theme::style_faint())
+                theme::surface()
             };
-            items.push(ListItem::new(Line::from(vec![
-                prefix,
-                Span::styled(row, style),
-            ])));
-        }
-        if !sessions.live_rdp.is_empty() {
-            items.push(ListItem::new(Span::styled(
-                format!(" ── rdp · {} ── ", sessions.live_rdp.len()),
-                theme::style_faint(),
-            )));
+            let bar_style =
+                Style::default()
+                    .bg(row_bg)
+                    .fg(if selected { theme::accent() } else { row_bg });
+            let name_style = Style::default()
+                .bg(row_bg)
+                .fg(if selected {
+                    theme::text()
+                } else {
+                    theme::muted()
+                })
+                .add_modifier(if selected && focused {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                });
+            let target_style = Style::default().bg(row_bg).fg(theme::faint());
+            let dot_style = Style::default().bg(row_bg).fg(if live {
+                theme::accent()
+            } else if failed {
+                theme::danger()
+            } else {
+                row_bg
+            });
+
+            let mut spans = vec![
+                Span::styled(if selected { "▎" } else { " " }, bar_style),
+                Span::styled(" ", Style::default().bg(row_bg)),
+                Span::styled(name, name_style),
+            ];
+            if pad > 0 {
+                spans.push(Span::styled(" ".repeat(pad), Style::default().bg(row_bg)));
+            }
+            spans.push(Span::styled(target, target_style));
+            spans.push(Span::styled("  ", Style::default().bg(row_bg)));
+            spans.push(Span::styled(state, dot_style));
+            items.push(ListItem::new(Line::from(spans)));
         }
     }
+
     frame.render_widget(
         List::new(items)
             .block(
@@ -256,27 +331,40 @@ fn render_profiles(frame: &mut Frame, area: Rect, sessions: &SessionManager, foc
     );
 }
 
+fn terminal_title(ctx: &RenderCtx<'_>, focused: bool) -> Line<'static> {
+    if ctx.session_tab_labels.is_empty() {
+        return Line::from(Span::styled(
+            " Session · Enter on a profile to connect ",
+            theme::style_title(focused),
+        ));
+    }
+    let mut spans = vec![Span::styled(" SSH ", theme::style_faint())];
+    for (i, label) in ctx.session_tab_labels.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("│", theme::style_faint()));
+        }
+        if i == ctx.session_tab_active {
+            let style = if focused {
+                theme::style_pill_on(theme::accent())
+            } else {
+                Style::default()
+                    .fg(theme::text())
+                    .bg(theme::surface_3())
+                    .add_modifier(Modifier::BOLD)
+            };
+            spans.push(Span::styled(format!(" {label} "), style));
+        } else {
+            spans.push(Span::styled(format!(" {label} "), theme::style_muted()));
+        }
+    }
+    spans.push(Span::styled("  Ctrl-` profiles ", theme::style_faint()));
+    Line::from(spans)
+}
+
 fn render_terminal(frame: &mut Frame, area: Rect, ctx: &RenderCtx<'_>) {
     let focused = ctx.ui.focus == Focus::Terminal;
     let border = theme::border(focused);
-    let title = if ctx.session_tab_labels.is_empty() {
-        " Session · Enter on a profile to connect ".to_string()
-    } else {
-        let tabs: String = ctx
-            .session_tab_labels
-            .iter()
-            .enumerate()
-            .map(|(i, l)| {
-                if i == ctx.session_tab_active {
-                    format!("[{l}]")
-                } else {
-                    format!(" {l} ")
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("│");
-        format!(" SSH {tabs} · Ctrl-] next · Ctrl-W close ")
-    };
+    let title = terminal_title(ctx, focused);
 
     let styled = ctx.terminal_styled.unwrap_or(&[]);
     let lines = ctx.terminal_lines.unwrap_or(&[]);
@@ -319,7 +407,7 @@ fn render_terminal(frame: &mut Frame, area: Rect, ctx: &RenderCtx<'_>) {
                 Block::default()
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
-                    .title(Span::styled(title, theme::style_title(focused)))
+                    .title(title)
                     .border_style(Style::default().fg(border))
                     .style(Style::default().bg(theme::bg())),
             ),
@@ -341,8 +429,9 @@ fn render_terminal(frame: &mut Frame, area: Rect, ctx: &RenderCtx<'_>) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
-                .title(Span::styled(title, theme::style_title(focused)))
+                .title(title)
                 .border_style(Style::default().fg(border))
+                .padding(Padding::new(1, 1, 0, 0))
                 .style(Style::default().bg(theme::bg()).fg(theme::text())),
         ),
         area,
@@ -418,20 +507,18 @@ fn render_discover(frame: &mut Frame, screen: Rect, ui: &UiState) {
 
     let entries: &[(&str, &str)] = if ui.focus == Focus::Terminal {
         &[
-            ("Ctrl-]", "next tab"),
-            ("Ctrl-[", "prev tab"),
-            ("Ctrl-W", "close tab"),
-            ("Ctrl-P", "command palette"),
-            ("Esc", "back to profiles"),
+            ("Ctrl-` / F12", "back to profiles"),
+            ("all keys", "go to the SSH session"),
         ]
     } else {
         &[
             ("Enter", "connect selected"),
             ("a  A", "add SSH · add RDP"),
             ("e  x", "edit · delete"),
-            ("Ctrl-]", "next SSH tab"),
+            ("]  [", "next / prev SSH tab"),
             ("Ctrl-W", "close SSH tab"),
             ("Ctrl-P", "command palette"),
+            ("Ctrl-Q", "quit"),
         ]
     };
     let scope = if ui.focus == Focus::Terminal {
@@ -440,7 +527,7 @@ fn render_discover(frame: &mut Frame, screen: Rect, ui: &UiState) {
         "Profiles"
     };
 
-    let width = screen.width.clamp(34, 44);
+    let width = screen.width.clamp(34, 46);
     let height = (entries.len() as u16)
         .saturating_add(5)
         .min(screen.height.saturating_sub(4))
@@ -509,4 +596,26 @@ fn render_discover(frame: &mut Frame, screen: Rect, ui: &UiState) {
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), body);
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
+    if s.width() <= max {
+        return s.to_string();
+    }
+    if max == 1 {
+        return "…".into();
+    }
+    let mut out = String::new();
+    for ch in s.chars() {
+        let next = out.width() + ch.to_string().width();
+        if next > max - 1 {
+            break;
+        }
+        out.push(ch);
+    }
+    out.push('…');
+    out
 }

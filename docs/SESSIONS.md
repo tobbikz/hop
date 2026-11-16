@@ -12,7 +12,7 @@ Existing installs that only have `~/.config/tui-ide/` keep using it until the ne
 
 Optional saved passwords (MobaXterm-style): `~/.config/tui-sessions/sessions-secrets.toml` (mode **0600**), keyed by profile id.
 
-On SSH connect (empty `identity_file`): password modal → **Space** toggles remember → **Enter** connects via **`sshpass`** when available (reliable, no passphrase-for-key confusion). Clear via palette **Clear saved SSH password**.
+On SSH connect (empty `identity_file`): password modal → **Tab** toggles remember → **Enter** connects via **`sshpass`** when available (reliable, no passphrase-for-key confusion). Clear via palette **Clear saved SSH password**.
 
 ```bash
 sudo pacman -S sshpass   # Arch — recommended for password logins
@@ -30,10 +30,11 @@ sudo pacman -S sshpass   # Arch — recommended for password logins
 ## Host chrome
 - Product boots into **Sessions** (Profiles list + Session main pane)
 - Soft selection (`▎` + `surface_3`), rounded borders, theme tokens
-- `Space` discover · `Ctrl-P` palette · `Shift-T` theme info (AMOLED mono is locked)
-- SSH live sessions → main pane PTY with multi-tabs (`Ctrl-]` / `Ctrl-W`)
-- RDP → external window; live mark on profile row
-- Chord `Ctrl-Shift-S` / palette **Sessions** still works from other surfaces
+- `Space` shortcuts · `Ctrl-P` palette · `Shift-T` theme info (AMOLED mono is locked)
+- SSH live sessions → main pane PTY with multi-tabs (`]` / `[` / `Ctrl-W` in the profile list)
+- RDP → external window; live/failed dot on the profile row
+- Inside the PTY every key goes to the remote program; `Ctrl-\`` or `F12` returns to profiles
+- `x` asks for confirmation before deleting a profile
 
 ## Non-goals
 RDP/VNC framebuffer in ratatui, mosh, Termius clone.

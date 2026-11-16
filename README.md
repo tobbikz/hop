@@ -78,13 +78,14 @@ Press `a` for SSH, `A` for RDP, then `Enter` to connect.
 | `Enter` | Connect selected profile |
 | `a` / `A` | Add SSH / Add RDP |
 | `e` | Edit |
-| `x` | Delete |
-| `Space` | Discover next keys |
-| `Ctrl-P` | Command palette |
+| `x` | Delete (asks to confirm) |
+| `Space` | Show shortcut sheet |
+| `Ctrl-P` | Command palette (profiles) |
 | `Shift-T` | Theme info (AMOLED mono is locked) |
-| `Ctrl-]` / `Ctrl-[` | Next / prev SSH tab |
-| `Ctrl-W` | Close SSH tab |
-| `Esc` | Close discover / form · back |
+| `]` / `[` | Next / prev SSH tab (profiles) |
+| `Ctrl-W` | Close SSH tab (profiles) |
+| `Ctrl-\`` / `F12` | Back to profiles while typing in SSH |
+| `Ctrl-Q` | Quit (from profiles) |
 
 ---
 
