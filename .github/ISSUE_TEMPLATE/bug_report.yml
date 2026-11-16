@@ -1,17 +1,17 @@
 name: Bug report
-description: Report a reproducible problem
+description: Report a reproducible problem in Hop
 labels: ["bug"]
 body:
   - type: markdown
     attributes:
       value: |
-        Thanks for the report. Please run `tui-sessions --doctor` and include its output.
+        Thanks for the report. Please run `hop --doctor` and include its output.
         Do not paste passwords or private keys.
   - type: input
     id: version
     attributes:
-      label: tui-sessions version
-      description: Output of `tui-sessions --version`
+      label: Hop version
+      description: Output of `hop --version`
     validations:
       required: true
   - type: input
@@ -40,14 +40,14 @@ body:
     id: actual
     attributes:
       label: Actual behavior
-      description: Include relevant lines from `~/.cache/tui-sessions/tui-sessions.log`
+      description: Include relevant lines from `~/.cache/hop/hop.log`
     validations:
       required: true
   - type: textarea
     id: doctor
     attributes:
       label: Diagnostics
-      description: Output of `tui-sessions --doctor`
+      description: Output of `hop --doctor`
       render: text
   - type: checkboxes
     id: checks

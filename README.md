@@ -1,13 +1,14 @@
 # Hop
 
 **Keyboard-first SSH / RDP session manager for the terminal.**
+
 Profiles on the left · live SSH PTY on the right · Space discover — OpenCode-inspired mono chrome.
 
 [![CI](https://github.com/tobbikz/hop/actions/workflows/ci.yml/badge.svg)](https://github.com/tobbikz/hop/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/tobbikz/hop?display_name=tag)](https://github.com/tobbikz/hop/releases)
 
-Formerly **tui-sessions** (spun out of [tui-ide](https://github.com/tobbikz/tui-ide)). Design language: [docs/TUI-DESIGN.md](docs/TUI-DESIGN.md).
+**Hop** (binary `hop`) was formerly *tui-sessions*, spun out of [tui-ide](https://github.com/tobbikz/tui-ide). Design language: [docs/TUI-DESIGN.md](docs/TUI-DESIGN.md).
 
 ---
 

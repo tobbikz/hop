@@ -3,6 +3,12 @@
 All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- GitHub project branding and issue templates use **Hop**; `main` is protected (no force-push / delete; PRs for non-admins).
+
 ## [0.7.1] - 2026-11-15
 
 ### Fixed

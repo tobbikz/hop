@@ -681,7 +681,7 @@ fn render_discover(frame: &mut Frame, screen: Rect, ui: &UiState) {
         .border_style(Style::default().fg(theme::accent()))
         .style(Style::default().bg(theme::bg()))
         .title(Span::styled(
-            format!(" hop · discover · {scope} "),
+            format!(" Hop · discover · {scope} "),
             theme::Role::Accent.style(),
         ))
         .title_bottom(Line::from(Span::styled(
