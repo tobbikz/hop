@@ -1,4 +1,4 @@
-//! Integrated terminal via portable-pty.
+//! Integrated terminal via portable-pty + vt100 screen (real ANSI/CSI).
 
 use anyhow::{Context, Result};
 use parking_lot::Mutex;
@@ -10,8 +10,8 @@ use tracing::warn;
 pub struct TerminalPane {
     master: Box<dyn MasterPty + Send>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    parser: Arc<Mutex<vt100::Parser>>,
     reader_buf: Arc<Mutex<String>>,
-    scroll: usize,
     cols: u16,
     rows: u16,
     _child: Box<dyn portable_pty::Child + Send + Sync>,
@@ -24,13 +24,23 @@ impl TerminalPane {
         Self::spawn_command(cwd, cols, rows, &shell, &[])
     }
 
-    /// Spawn an arbitrary command in a PTY (e.g. `ssh` with args).
     pub fn spawn_command(
         cwd: &std::path::Path,
         cols: u16,
         rows: u16,
         program: &str,
         args: &[String],
+    ) -> Result<Self> {
+        Self::spawn_command_with_env(cwd, cols, rows, program, args, &[])
+    }
+
+    pub fn spawn_command_with_env(
+        cwd: &std::path::Path,
+        cols: u16,
+        rows: u16,
+        program: &str,
+        args: &[String],
+        env: &[(String, String)],
     ) -> Result<Self> {
         let cols = cols.max(10);
         let rows = rows.max(3);
@@ -48,6 +58,13 @@ impl TerminalPane {
         for a in args {
             cmd.arg(a);
         }
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
+        // Tell apps the host is dark (fg;bg) so prompts stay readable on AMOLED.
+        cmd.env("COLORFGBG", "15;0");
         cmd.cwd(cwd);
 
         let child = pair
@@ -58,19 +75,23 @@ impl TerminalPane {
 
         let mut reader = pair.master.try_clone_reader().context("clone reader")?;
         let writer = pair.master.take_writer().context("take writer")?;
+
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 2000)));
         let reader_buf = Arc::new(Mutex::new(String::new()));
+        let parser_c = parser.clone();
         let buf_c = reader_buf.clone();
 
         let handle = std::thread::spawn(move || {
-            let mut tmp = [0u8; 4096];
+            let mut tmp = [0u8; 8192];
             loop {
                 match reader.read(&mut tmp) {
                     Ok(0) => break,
                     Ok(n) => {
-                        let s = String::from_utf8_lossy(&tmp[..n]);
+                        let chunk = &tmp[..n];
+                        parser_c.lock().process(chunk);
+                        let s = String::from_utf8_lossy(chunk);
                         let mut g = buf_c.lock();
                         g.push_str(&s);
-                        // keep last ~200k chars
                         if g.len() > 200_000 {
                             let keep = g.len() - 150_000;
                             g.drain(..keep);
@@ -87,8 +108,8 @@ impl TerminalPane {
         Ok(Self {
             master: pair.master,
             writer: Arc::new(Mutex::new(writer)),
+            parser,
             reader_buf,
-            scroll: 0,
             cols,
             rows,
             _child: child,
@@ -112,6 +133,7 @@ impl TerminalPane {
         }) {
             warn!("pty resize: {e}");
         }
+        self.parser.lock().set_size(rows, cols);
     }
 
     pub fn size(&self) -> (u16, u16) {
@@ -131,101 +153,177 @@ impl TerminalPane {
         self.write_bytes(s.as_bytes())
     }
 
+    /// Visible screen rows after vt100 interprets CSI (clear, cursor, color, …).
     pub fn visible_lines(&self) -> Vec<String> {
-        let g = self.reader_buf.lock();
-        // strip some ANSI for display simplicity
-        let plain = strip_ansi(&g);
-        let lines: Vec<&str> = plain.lines().collect();
-        let h = self.rows as usize;
-        let total = lines.len();
-        let start = total.saturating_sub(h + self.scroll);
-        let end = total.saturating_sub(self.scroll);
-        lines[start..end.max(start)]
-            .iter()
-            .map(|s| s.chars().take(self.cols as usize).collect())
+        let parser = self.parser.lock();
+        let screen = parser.screen();
+        let (_rows, cols) = screen.size();
+        screen
+            .rows(0, cols)
+            .map(|row| row.trim_end().to_string())
             .collect()
     }
 
+    /// Cell grid for colored ratatui rendering.
+    pub fn styled_rows(&self) -> Vec<Vec<TermSpan>> {
+        let parser = self.parser.lock();
+        let screen = parser.screen();
+        let (rows, cols) = screen.size();
+        let mut out = Vec::with_capacity(rows as usize);
+        for row in 0..rows {
+            let mut spans: Vec<TermSpan> = Vec::new();
+            let mut cur = TermSpan {
+                text: String::new(),
+                fg: None,
+                bg: None,
+                bold: false,
+            };
+            for col in 0..cols {
+                let Some(cell) = screen.cell(row, col) else {
+                    continue;
+                };
+                if cell.is_wide_continuation() {
+                    continue;
+                }
+                let contents = cell.contents();
+                let ch = if contents.is_empty() {
+                    " "
+                } else {
+                    contents.as_str()
+                };
+                let fg = color_rgb(cell.fgcolor());
+                let bg = color_rgb(cell.bgcolor());
+                let bold = cell.bold();
+                if cur.text.is_empty() {
+                    cur.fg = fg;
+                    cur.bg = bg;
+                    cur.bold = bold;
+                    cur.text.push_str(ch);
+                } else if cur.fg == fg && cur.bg == bg && cur.bold == bold {
+                    cur.text.push_str(ch);
+                } else {
+                    spans.push(std::mem::replace(
+                        &mut cur,
+                        TermSpan {
+                            text: ch.to_string(),
+                            fg,
+                            bg,
+                            bold,
+                        },
+                    ));
+                }
+            }
+            if !cur.text.is_empty() {
+                if let Some(trimmed) = Some(cur.text.trim_end()) {
+                    cur.text = trimmed.to_string();
+                }
+                if !cur.text.is_empty() {
+                    spans.push(cur);
+                }
+            }
+            out.push(spans);
+        }
+        out
+    }
+
     pub fn scroll_up(&mut self) {
-        self.scroll += 1;
+        let mut p = self.parser.lock();
+        let cur = p.screen().scrollback();
+        p.set_scrollback(cur.saturating_add(1));
     }
 
     pub fn scroll_down(&mut self) {
-        self.scroll = self.scroll.saturating_sub(1);
+        let mut p = self.parser.lock();
+        let cur = p.screen().scrollback();
+        p.set_scrollback(cur.saturating_sub(1));
+    }
+
+    pub fn auto_type_password(&self, password: String) {
+        let buf = self.reader_buf.clone();
+        let writer = self.writer.clone();
+        std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(25);
+            while std::time::Instant::now() < deadline {
+                let hay = {
+                    let g = buf.lock();
+                    g.to_ascii_lowercase()
+                };
+                let tail: String = hay
+                    .chars()
+                    .rev()
+                    .take(160)
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect();
+                let login_pw = (tail.contains("password:") || tail.contains("'s password"))
+                    && !tail.contains("passphrase for key");
+                if login_pw {
+                    std::thread::sleep(std::time::Duration::from_millis(80));
+                    let mut w = writer.lock();
+                    let _ = w.write_all(password.as_bytes());
+                    let _ = w.write_all(b"\r");
+                    let _ = w.flush();
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(30));
+            }
+        });
+    }
+
+    pub fn snapshot_text(&self) -> String {
+        self.parser.lock().screen().contents()
     }
 }
 
-fn strip_ansi(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\u{1b}' {
-            match chars.peek().copied() {
-                // CSI: ESC [ ... final-byte
-                Some('[') => {
-                    chars.next();
-                    for c2 in chars.by_ref() {
-                        if (0x40..=0x7e).contains(&(c2 as u32)) {
-                            break;
-                        }
-                    }
-                }
-                // OSC: ESC ] ... BEL  or  ESC ] ... ESC \
-                Some(']') => {
-                    chars.next();
-                    while let Some(c2) = chars.next() {
-                        if c2 == '\u{07}' {
-                            break;
-                        }
-                        if c2 == '\u{1b}' && chars.peek() == Some(&'\\') {
-                            chars.next();
-                            break;
-                        }
-                    }
-                }
-                Some(_) => {
-                    let _ = chars.next();
-                }
-                None => {}
-            }
-            continue;
-        }
-        if c == '\r' || c == '\u{07}' {
-            continue;
-        }
-        // Orphan OSC title crumbs if ESC was already lost (e.g. "]0;title")
-        if c == ']' && matches!(chars.peek(), Some('0'..='9')) {
-            while let Some(c2) = chars.next() {
-                if c2 == '\u{07}' || c2 == '\n' {
-                    break;
-                }
-                if c2 == '\u{1b}' && chars.peek() == Some(&'\\') {
-                    chars.next();
-                    break;
-                }
-            }
-            continue;
-        }
-        out.push(c);
-    }
-    out
+#[derive(Debug, Clone)]
+pub struct TermSpan {
+    pub text: String,
+    pub fg: Option<(u8, u8, u8)>,
+    pub bg: Option<(u8, u8, u8)>,
+    pub bold: bool,
 }
 
-#[cfg(test)]
-mod strip_tests {
-    use super::strip_ansi;
-
-    #[test]
-    fn strips_osc_window_title() {
-        let s = "\u{1b}]0;Cursor Agent\u{07}hello";
-        assert_eq!(strip_ansi(s), "hello");
+fn color_rgb(c: vt100::Color) -> Option<(u8, u8, u8)> {
+    match c {
+        vt100::Color::Default => None,
+        vt100::Color::Idx(i) => Some(ansi_idx_rgb(i)),
+        vt100::Color::Rgb(r, g, b) => Some((r, g, b)),
     }
+}
 
-    #[test]
-    fn strips_orphan_osc_crumb() {
-        let s = "]0;Cursor Agent\u{07}plan";
-        assert_eq!(strip_ansi(s), "plan");
+fn ansi_idx_rgb(i: u8) -> (u8, u8, u8) {
+    const BASIC: [(u8, u8, u8); 16] = [
+        (0, 0, 0),
+        (205, 0, 0),
+        (0, 205, 0),
+        (205, 205, 0),
+        (0, 0, 238),
+        (205, 0, 205),
+        (0, 205, 205),
+        (229, 229, 229),
+        (127, 127, 127),
+        (255, 0, 0),
+        (0, 255, 0),
+        (255, 255, 0),
+        (92, 92, 255),
+        (255, 0, 255),
+        (0, 255, 255),
+        (255, 255, 255),
+    ];
+    if (i as usize) < BASIC.len() {
+        return BASIC[i as usize];
     }
+    if (16..232).contains(&i) {
+        let n = i - 16;
+        let r = n / 36;
+        let g = (n % 36) / 6;
+        let b = n % 6;
+        let ramp = |v: u8| if v == 0 { 0 } else { 55 + 40 * v };
+        return (ramp(r), ramp(g), ramp(b));
+    }
+    let v = if i >= 232 { 8 + 10 * (i - 232) } else { 128 };
+    (v, v, v)
 }
 
 #[cfg(test)]
@@ -241,11 +339,22 @@ mod tests {
         pane.resize(60, 12);
         assert_eq!(pane.size(), (60, 12));
         pane.write_bytes(b"echo wave4\r").expect("write");
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(300));
         let lines = pane.visible_lines().join("\n");
         assert!(
             lines.contains("wave4") || !lines.is_empty(),
             "expected pty output, got: {lines:?}"
         );
+    }
+
+    #[test]
+    fn vt100_clear_does_not_garble() {
+        let mut parser = vt100::Parser::new(8, 40, 100);
+        parser.process(b"hello\r\nworld\r\n");
+        parser.process(b"\x1b[2J\x1b[H");
+        parser.process(b"clean\r\n");
+        let text = parser.screen().contents();
+        assert!(text.contains("clean"));
+        assert!(!text.contains("hello"));
     }
 }

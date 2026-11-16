@@ -1,9 +1,13 @@
 //! Remote session profiles (SSH PTY + RDP external launcher).
 //!
-//! SSOT file: `~/.config/tui-ide/sessions.toml`
-//! Never stores plaintext passwords — identity files / ssh-agent / env only.
+//! SSOT file: `~/.config/tui-sessions/sessions.toml` (no passwords).
+//! Optional passwords: `sessions-secrets.toml` (0600) — MobaXterm-style save.
 
-use anyhow::{Context, Result, bail};
+mod secrets;
+
+pub use secrets::{clear_password, get_password, has_password, secrets_file_path, set_password};
+
+use anyhow::{bail, Context, Result};
 use ide_term::TerminalPane;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -48,7 +52,11 @@ fn default_ssh_port() -> u16 {
 }
 
 impl SessionProfile {
-    pub fn new_ssh(name: impl Into<String>, host: impl Into<String>, user: impl Into<String>) -> Self {
+    pub fn new_ssh(
+        name: impl Into<String>,
+        host: impl Into<String>,
+        user: impl Into<String>,
+    ) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
             name: name.into(),
@@ -63,7 +71,11 @@ impl SessionProfile {
         }
     }
 
-    pub fn new_rdp(name: impl Into<String>, host: impl Into<String>, user: impl Into<String>) -> Self {
+    pub fn new_rdp(
+        name: impl Into<String>,
+        host: impl Into<String>,
+        user: impl Into<String>,
+    ) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
             name: name.into(),
@@ -91,8 +103,16 @@ impl SessionProfile {
         format!("[{kind}] {} — {target}", self.name)
     }
 
-    /// Build `ssh` argv (without program name). No passwords.
+    /// Build `ssh` argv (without program name). No passwords in the argv.
+    ///
+    /// `password_login`: MobaXterm-style account password — do **not** offer
+    /// default `~/.ssh/id_*` keys (those ask for a *key passphrase*, which
+    /// remote servers without your pubkey never show).
     pub fn ssh_args(&self) -> Result<Vec<String>> {
+        self.ssh_args_with_options(false)
+    }
+
+    pub fn ssh_args_with_options(&self, password_login: bool) -> Result<Vec<String>> {
         if self.kind != SessionKind::Ssh {
             bail!("not an SSH profile");
         }
@@ -101,19 +121,30 @@ impl SessionProfile {
         }
         let mut args = Vec::new();
         args.push("-o".into());
-        args.push("BatchMode=yes".into());
-        args.push("-o".into());
         args.push("StrictHostKeyChecking=accept-new".into());
+        args.push("-t".into()); // force TTY for prompts
         if self.port != 0 && self.port != 22 {
             args.push("-p".into());
             args.push(self.port.to_string());
         }
+
         let id = self.identity_file.trim();
-        if !id.is_empty() {
+        if password_login || id.is_empty() {
+            // No default identities → same as a server that only wants password.
+            args.push("-o".into());
+            args.push("IdentitiesOnly=yes".into());
+            args.push("-o".into());
+            args.push("PreferredAuthentications=password,keyboard-interactive".into());
+            args.push("-o".into());
+            args.push("PubkeyAuthentication=no".into());
+        } else {
             let path = expand_tilde(id);
+            args.push("-o".into());
+            args.push("IdentitiesOnly=yes".into());
             args.push("-i".into());
             args.push(path.display().to_string());
         }
+
         let jump = self.jump_host.trim();
         if !jump.is_empty() {
             args.push("-J".into());
@@ -267,11 +298,11 @@ impl SessionManager {
         if name.is_empty() || host.is_empty() {
             bail!("name and host required");
         }
-        let port: u16 = self.form_port.trim().parse().unwrap_or(if self.form_kind_ssh {
-            22
-        } else {
-            3389
-        });
+        let port: u16 = self
+            .form_port
+            .trim()
+            .parse()
+            .unwrap_or(if self.form_kind_ssh { 22 } else { 3389 });
         let mut profile = if self.form_kind_ssh {
             SessionProfile::new_ssh(name, host, self.form_user.trim())
         } else {
@@ -309,19 +340,56 @@ impl SessionManager {
         self.save()
     }
 
-    pub fn connect_selected(
+    pub fn connect_selected(&mut self, cwd: &Path, cols: u16, rows: u16) -> Result<ConnectOutcome> {
+        self.connect_selected_with_password(cwd, cols, rows, None)
+    }
+
+    /// SSH connect; if `password` is set, auto-types it at the password prompt.
+    pub fn connect_selected_with_password(
         &mut self,
         cwd: &Path,
         cols: u16,
         rows: u16,
+        password: Option<String>,
     ) -> Result<ConnectOutcome> {
         let Some(profile) = self.selected_profile().cloned() else {
             bail!("no profile selected");
         };
         match profile.kind {
             SessionKind::Ssh => {
-                let args = profile.ssh_args()?;
-                let pane = TerminalPane::spawn_command(cwd, cols, rows, "ssh", &args)?;
+                if which("ssh").is_none() {
+                    bail!(
+                        "`ssh` was not found in PATH. Install an OpenSSH client \
+                         (Debian/Ubuntu: `sudo apt install openssh-client`, \
+                         Fedora: `sudo dnf install openssh-clients`, \
+                         Arch: `sudo pacman -S openssh`)."
+                    );
+                }
+                let pw = password.filter(|s| !s.is_empty());
+                // Password login → never offer default id_* keys (avoids passphrase prompts).
+                let password_login = pw.is_some() || profile.identity_file.trim().is_empty();
+                let ssh_args = profile.ssh_args_with_options(password_login)?;
+                let pane = if let Some(ref pass) = pw {
+                    if which("sshpass").is_some() {
+                        // Moba-style: inject password out-of-band (no echo / no race).
+                        let mut args = vec!["-e".into(), "ssh".into()];
+                        args.extend(ssh_args);
+                        TerminalPane::spawn_command_with_env(
+                            cwd,
+                            cols,
+                            rows,
+                            "sshpass",
+                            &args,
+                            &[("SSHPASS".into(), pass.clone())],
+                        )?
+                    } else {
+                        let pane = TerminalPane::spawn_command(cwd, cols, rows, "ssh", &ssh_args)?;
+                        pane.auto_type_password(pass.clone());
+                        pane
+                    }
+                } else {
+                    TerminalPane::spawn_command(cwd, cols, rows, "ssh", &ssh_args)?
+                };
                 let live = LiveSsh {
                     id: Uuid::new_v4().to_string(),
                     profile_id: profile.id.clone(),
@@ -394,10 +462,8 @@ impl SessionManager {
     }
 
     pub fn reap_rdp(&mut self) {
-        self.live_rdp.retain_mut(|r| match r.child.try_wait() {
-            Ok(None) => true,
-            _ => false,
-        });
+        self.live_rdp
+            .retain_mut(|r| matches!(r.child.try_wait(), Ok(None)));
     }
 
     pub fn kill_rdp_for_profile(&mut self, profile_id: &str) {
@@ -420,8 +486,7 @@ pub enum ConnectOutcome {
 }
 
 pub fn sessions_path() -> Option<PathBuf> {
-    let mut p = dirs::config_dir()?;
-    p.push("tui-ide");
+    let mut p = ide_core::config_dir()?;
     p.push("sessions.toml");
     Some(p)
 }
@@ -436,12 +501,24 @@ fn load_file(path: &Path) -> Result<SessionsFile> {
 }
 
 fn expand_tilde(p: &str) -> PathBuf {
-    if p.starts_with("~/") {
+    if let Some(rest) = p.strip_prefix("~/") {
         if let Some(home) = dirs::home_dir() {
-            return home.join(&p[2..]);
+            return home.join(rest);
         }
     }
     PathBuf::from(p)
+}
+
+pub fn ssh_available() -> bool {
+    which("ssh").is_some()
+}
+
+pub fn sshpass_available() -> bool {
+    which("sshpass").is_some()
+}
+
+pub fn rdp_client_available(preferred: &str) -> bool {
+    find_rdp_client(preferred).is_some()
 }
 
 pub fn find_rdp_client(preferred: &str) -> Option<&'static str> {
@@ -477,8 +554,14 @@ fn which(name: &str) -> Option<PathBuf> {
 }
 
 fn spawn_rdp(profile: &SessionProfile) -> Result<Child> {
-    let client = find_rdp_client(&profile.rdp_client)
-        .ok_or_else(|| anyhow::anyhow!("no RDP client (xfreerdp / wlfreerdp / remmina) in PATH"))?;
+    let client = find_rdp_client(&profile.rdp_client).ok_or_else(|| {
+        anyhow::anyhow!(
+            "no RDP client found. Install one of xfreerdp, wlfreerdp or remmina \
+             (Debian/Ubuntu: `sudo apt install freerdp2-x11`, \
+             Fedora: `sudo dnf install freerdp`, \
+             Arch: `sudo pacman -S freerdp`) or set `rdp_client` on this profile."
+        )
+    })?;
     let host = profile.host.trim();
     if host.is_empty() {
         bail!("RDP host empty");
@@ -496,7 +579,14 @@ fn spawn_rdp(profile: &SessionProfile) -> Result<Child> {
         }
         _ => {
             // FreeRDP family
-            cmd.arg(format!("/v:{host}:{}", if profile.port == 0 { 3389 } else { profile.port }));
+            cmd.arg(format!(
+                "/v:{host}:{}",
+                if profile.port == 0 {
+                    3389
+                } else {
+                    profile.port
+                }
+            ));
             if !profile.user.trim().is_empty() {
                 cmd.arg(format!("/u:{}", profile.user.trim()));
             }

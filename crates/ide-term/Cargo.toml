@@ -3,9 +3,11 @@ name = "ide-term"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "PTY-backed terminal pane for tui-sessions"
 
 [dependencies]
 anyhow.workspace = true
 portable-pty.workspace = true
 parking_lot.workspace = true
 tracing.workspace = true
+vt100.workspace = true

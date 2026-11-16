@@ -3,24 +3,16 @@ name = "ide-ui"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Ratatui widgets and palettes for tui-sessions"
 
 [dependencies]
 ide-core.workspace = true
-ide-buffer.workspace = true
-ide-fs.workspace = true
-ide-syntax.workspace = true
-ide-lsp.workspace = true
-ide-git.workspace = true
-ide-search.workspace = true
 ide-sessions.workspace = true
-ide-agents.workspace = true
-ide-db.workspace = true
-ide-config.workspace = true
-ide-dap.workspace = true
-ide-nvim.workspace = true
-ide-plugins = { workspace = true, optional = true }
+ide-term.workspace = true
 ratatui.workspace = true
-crossterm.workspace = true
 unicode-width.workspace = true
 nucleo-matcher.workspace = true
-lsp-types.workspace = true
+serde.workspace = true
+toml.workspace = true
+anyhow.workspace = true
+parking_lot.workspace = true
