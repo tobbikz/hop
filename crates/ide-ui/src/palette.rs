@@ -127,14 +127,20 @@ pub fn render_palette(frame: &mut Frame, screen: Rect, palette: &Palette) {
     let width = screen.width.clamp(48, 78);
     let height = screen.height.clamp(10, 20);
     let area = centered(screen, width, height);
-    frame.render_widget(Clear, area);
+    modal_chrome(frame, screen, area);
 
     frame.render_widget(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme::border_idle()))
-            .style(Style::default().bg(theme::surface()))
-            .title(" commands "),
+            .border_type(ratatui::widgets::BorderType::Plain)
+            .border_style(Style::default().fg(theme::border_focus()))
+            .style(Style::default().bg(theme::bg()))
+            .title(Span::styled(
+                " commands ",
+                Style::default()
+                    .fg(theme::text())
+                    .add_modifier(Modifier::BOLD),
+            )),
         area,
     );
 
@@ -179,7 +185,7 @@ pub fn render_palette(frame: &mut Frame, screen: Rect, palette: &Palette) {
         ])
     };
     frame.render_widget(
-        Paragraph::new(filter_text).style(Style::default().bg(theme::surface_2())),
+        Paragraph::new(filter_text).style(Style::default().bg(theme::bg())),
         inner[1],
     );
     frame.render_widget(
@@ -233,59 +239,71 @@ pub fn render_session_password(
     has_saved: bool,
     remember: bool,
 ) {
-    let area = centered(screen, screen.width.clamp(40, 56), 11);
-    scrim(frame, screen, area);
+    let area = centered(screen, screen.width.clamp(44, 56), 13);
+    modal_chrome(frame, screen, area);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(ratatui::widgets::BorderType::Rounded)
-        .border_style(Style::default().fg(theme::accent()))
-        .style(Style::default().bg(theme::modal()))
-        .title(Span::styled(
-            " SSH login password ",
-            Style::default()
-                .fg(theme::accent())
-                .add_modifier(Modifier::BOLD),
-        ))
-        .title_bottom(Line::from(Span::styled(
-            " Tab remember · Enter connect · Esc cancel ",
-            theme::style_faint(),
-        )));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let inner = Block::default().borders(Borders::ALL).inner(area);
+    fill_rect(
+        frame,
+        inner,
+        Style::default().bg(theme::bg()).fg(theme::bg()),
+    );
 
+    let label = truncate_label(profile_label, (inner.width as usize).saturating_sub(4));
     let masked: String = if input.is_empty() {
         if has_saved {
-            "••••••••  (saved · Enter to use / type to replace)".into()
+            "••••••••".into()
         } else {
-            String::new()
+            "·".repeat(8)
         }
     } else {
-        "•".repeat(input.chars().count().max(1))
+        "•".repeat(input.chars().count().clamp(1, 32))
     };
+    let field_hint = if input.is_empty() && has_saved {
+        "saved · Enter uses it · type to replace"
+    } else if input.is_empty() {
+        "type password · empty = agent/keys"
+    } else {
+        "Enter confirm"
+    };
+    let rule = "─".repeat((inner.width as usize).saturating_sub(4).min(40));
+
+    // Ordered stack: title → target → field → remember → actions.
     let lines = vec![
         Line::from(Span::styled(
-            format!("  {profile_label}"),
-            theme::style_muted(),
+            "  SSH login",
+            Style::default()
+                .fg(theme::text())
+                .add_modifier(Modifier::BOLD),
         )),
+        Line::from(Span::styled(format!("  {label}"), theme::style_muted())),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("  password  ", theme::style_muted()),
-            Span::styled(format!(" {masked} "), theme::style_selected()),
-        ]),
+        Line::from(Span::styled("  password", theme::style_faint())),
+        Line::from(Span::styled(
+            format!("  {masked}_"),
+            Style::default()
+                .fg(theme::text())
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(format!("  {rule}"), theme::style_faint())),
+        Line::from(Span::styled(
+            format!("  {field_hint}"),
+            theme::style_faint(),
+        )),
         Line::from(""),
         Line::from(vec![
             Span::styled(
                 if remember { "  [x] " } else { "  [ ] " },
                 Style::default()
-                    .fg(theme::accent())
+                    .fg(theme::text())
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("remember password  (Tab toggle)", theme::style_muted()),
+            Span::styled("remember password", theme::style_muted()),
+            Span::styled("  Tab", theme::style_faint()),
         ]),
         Line::from(""),
         Line::from(Span::styled(
-            "  case-sensitive · sshpass · Enter empty = use saved",
+            "  Enter confirm · Esc cancel",
             theme::style_faint(),
         )),
     ];
@@ -293,46 +311,38 @@ pub fn render_session_password(
 }
 
 pub fn render_confirm_delete(frame: &mut Frame, screen: Rect, profile_label: &str) {
-    let area = centered(screen, screen.width.clamp(44, 62), 9);
-    scrim(frame, screen, area);
+    let area = centered(screen, screen.width.clamp(44, 56), 10);
+    modal_chrome(frame, screen, area);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(ratatui::widgets::BorderType::Rounded)
-        .border_style(Style::default().fg(theme::danger()))
-        .style(Style::default().bg(theme::modal()))
-        .title(Span::styled(
-            " Delete profile ",
-            Style::default()
-                .fg(theme::danger())
-                .add_modifier(Modifier::BOLD),
-        ));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let inner = Block::default().borders(Borders::ALL).inner(area);
+    fill_rect(
+        frame,
+        inner,
+        Style::default().bg(theme::bg()).fg(theme::bg()),
+    );
 
     let lines = vec![
         Line::from(Span::styled(
-            format!("  Delete \u{201c}{profile_label}\u{201d}?"),
+            "  Delete profile",
             Style::default()
                 .fg(theme::text())
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
         Line::from(Span::styled(
-            "  Removes it from sessions.toml. Live tabs stay open.",
+            format!("  “{profile_label}”"),
             theme::style_muted(),
         )),
         Line::from(Span::styled(
-            "  Saved password is kept until cleared from the palette.",
+            "  Removes it from sessions.toml.",
             theme::style_faint(),
         )),
+        Line::from(Span::styled("  Live tabs stay open.", theme::style_faint())),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("  Enter/y", theme::style_pill_off()),
-            Span::styled(" delete   ", theme::style_faint()),
-            Span::styled("Esc/n", theme::style_pill_off()),
-            Span::styled(" cancel", theme::style_faint()),
-        ]),
+        Line::from(Span::styled(
+            "  Enter/y delete · Esc/n cancel",
+            theme::style_muted(),
+        )),
     ];
     frame.render_widget(Paragraph::new(lines), inner);
 }
@@ -377,29 +387,26 @@ pub fn render_session_form(
     ];
 
     let width = screen.width.clamp(40, 64);
-    let height = screen.height.clamp(12, 16);
+    let height = screen.height.clamp(14, 18);
     let area = centered(screen, width, height);
-    scrim(frame, screen, area);
+    modal_chrome(frame, screen, area);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(ratatui::widgets::BorderType::Rounded)
-        .border_style(Style::default().fg(theme::accent()))
-        .style(Style::default().bg(theme::modal()))
-        .title(Span::styled(
-            format!(" {edit} {kind} profile "),
+    let inner = Block::default().borders(Borders::ALL).inner(area);
+    fill_rect(
+        frame,
+        inner,
+        Style::default().bg(theme::bg()).fg(theme::bg()),
+    );
+
+    let mut lines: Vec<Line> = vec![
+        Line::from(Span::styled(
+            format!("  {edit} {kind} profile"),
             Style::default()
-                .fg(theme::accent())
+                .fg(theme::text())
                 .add_modifier(Modifier::BOLD),
-        ))
-        .title_bottom(Line::from(Span::styled(
-            " ↓/Tab next · ↑/S-Tab prev · Enter save · Esc ",
-            theme::style_faint(),
-        )));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let mut lines: Vec<Line> = Vec::new();
+        )),
+        Line::from(""),
+    ];
     for (i, (label, val)) in fields.iter().enumerate() {
         let selected = i == field;
         let prefix = if selected {
@@ -427,7 +434,11 @@ pub fn render_session_form(
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        " no passwords stored — ssh-agent / -i key only",
+        "  no passwords stored — ssh-agent / -i key only",
+        theme::style_faint(),
+    )));
+    lines.push(Line::from(Span::styled(
+        "  ↓/Tab next · ↑/S-Tab prev · Enter save · Esc",
         theme::style_faint(),
     )));
     frame.render_widget(Paragraph::new(lines), inner);
@@ -444,14 +455,47 @@ fn centered(screen: Rect, width: u16, height: u16) -> Rect {
     }
 }
 
-fn scrim(frame: &mut Frame, screen: Rect, area: Rect) {
-    frame.render_widget(
-        Block::default().style(
-            Style::default()
-                .bg(theme::scrim())
-                .add_modifier(Modifier::DIM),
-        ),
+/// Opaque modal stack: Clear + cell fill (Block bg alone does not erase glyphs).
+fn modal_chrome(frame: &mut Frame, screen: Rect, area: Rect) {
+    frame.render_widget(Clear, screen);
+    fill_rect(
+        frame,
         screen,
+        Style::default().bg(theme::scrim()).fg(theme::scrim()),
     );
-    frame.render_widget(Clear, area);
+    fill_rect(
+        frame,
+        area,
+        Style::default().bg(theme::bg()).fg(theme::bg()),
+    );
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Plain)
+            .border_style(Style::default().fg(theme::border_focus()))
+            .style(Style::default().bg(theme::bg())),
+        area,
+    );
+}
+
+fn fill_rect(frame: &mut Frame, area: Rect, style: Style) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let row = " ".repeat(area.width as usize);
+    let lines: Vec<Line> = (0..area.height).map(|_| Line::from(row.as_str())).collect();
+    frame.render_widget(Paragraph::new(lines).style(style), area);
+}
+
+fn truncate_label(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max {
+        return s.to_string();
+    }
+    if max <= 1 {
+        return "…".into();
+    }
+    let mut out: String = s.chars().take(max - 1).collect();
+    out.push('…');
+    out
 }

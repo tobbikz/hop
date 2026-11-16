@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use parking_lot::Mutex;
 use portable_pty::{CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem};
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tracing::warn;
 
@@ -12,6 +13,9 @@ pub struct TerminalPane {
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     parser: Arc<Mutex<vt100::Parser>>,
     reader_buf: Arc<Mutex<String>>,
+    /// When true, PTY bytes still update byte counters but skip the VT parser
+    /// (used to drop late fastfetch/motd after a clean-open wipe).
+    discard_parser: Arc<AtomicBool>,
     cols: u16,
     rows: u16,
     _child: Box<dyn portable_pty::Child + Send + Sync>,
@@ -78,8 +82,10 @@ impl TerminalPane {
 
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 2000)));
         let reader_buf = Arc::new(Mutex::new(String::new()));
+        let discard_parser = Arc::new(AtomicBool::new(false));
         let parser_c = parser.clone();
         let buf_c = reader_buf.clone();
+        let discard_c = discard_parser.clone();
 
         let handle = std::thread::spawn(move || {
             let mut tmp = [0u8; 8192];
@@ -88,7 +94,9 @@ impl TerminalPane {
                     Ok(0) => break,
                     Ok(n) => {
                         let chunk = &tmp[..n];
-                        parser_c.lock().process(chunk);
+                        if !discard_c.load(Ordering::Acquire) {
+                            parser_c.lock().process(chunk);
+                        }
                         let s = String::from_utf8_lossy(chunk);
                         let mut g = buf_c.lock();
                         g.push_str(&s);
@@ -110,6 +118,7 @@ impl TerminalPane {
             writer: Arc::new(Mutex::new(writer)),
             parser,
             reader_buf,
+            discard_parser,
             cols,
             rows,
             _child: child,
@@ -151,6 +160,54 @@ impl TerminalPane {
         let mut buf = [0u8; 4];
         let s = c.encode_utf8(&mut buf);
         self.write_bytes(s.as_bytes())
+    }
+
+    /// Bytes read from the PTY so far (settle detection for motd/fastfetch).
+    pub fn bytes_read(&self) -> usize {
+        self.reader_buf.lock().len()
+    }
+
+    /// Non-empty visible rows — banners are many; a clean prompt is few.
+    pub fn non_empty_rows(&self) -> usize {
+        self.visible_lines()
+            .iter()
+            .filter(|l| !l.trim().is_empty())
+            .count()
+    }
+
+    /// Wipe local VT100 state (does not type into the remote shell).
+    pub fn hard_reset_screen(&self) {
+        let mut p = self.parser.lock();
+        *p = vt100::Parser::new(self.rows, self.cols, 2000);
+    }
+
+    pub fn set_discard_parser(&self, discard: bool) {
+        self.discard_parser.store(discard, Ordering::Release);
+    }
+
+    pub fn is_discarding_parser(&self) -> bool {
+        self.discard_parser.load(Ordering::Acquire)
+    }
+
+    /// Start ignoring motd/fastfetch bytes in the local VT (still counted in bytes_read).
+    pub fn begin_clean_open(&self) {
+        self.set_discard_parser(true);
+        self.hard_reset_screen();
+    }
+
+    /// Stop discarding and redraw the prompt via Ctrl-L — never types `clear\\r`
+    /// (that races with user input → `cclear` / phantom submits).
+    pub fn finish_clean_open(&self) {
+        self.hard_reset_screen();
+        self.set_discard_parser(false);
+        // Readline clear-screen: redraws prompt without executing a command.
+        let _ = self.write_bytes(b"\x0c");
+    }
+
+    /// One-shot local wipe + Ctrl-L (key dismiss / last-resort).
+    pub fn clean_open(&self) {
+        self.begin_clean_open();
+        self.finish_clean_open();
     }
 
     /// Visible screen rows after vt100 interprets CSI (clear, cursor, color, …).
@@ -356,5 +413,37 @@ mod tests {
         let text = parser.screen().contents();
         assert!(text.contains("clean"));
         assert!(!text.contains("hello"));
+    }
+
+    #[test]
+    fn hard_reset_wipes_visible_banner() {
+        let tmp = std::env::temp_dir().join("hop-term-clean-open");
+        let _ = std::fs::create_dir_all(&tmp);
+        let pane = TerminalPane::spawn(&tmp, 40, 12).expect("spawn");
+        pane.write_bytes(b"printf 'BANNER\\nLINE2\\nLINE3\\n'\r")
+            .expect("write");
+        std::thread::sleep(Duration::from_millis(250));
+        assert!(
+            pane.non_empty_rows() >= 1 || pane.bytes_read() > 0,
+            "expected some output before reset"
+        );
+        pane.hard_reset_screen();
+        assert_eq!(pane.non_empty_rows(), 0);
+    }
+
+    #[test]
+    fn finish_clean_open_does_not_type_clear_command() {
+        let tmp = std::env::temp_dir().join("hop-term-no-clear-cmd");
+        let _ = std::fs::create_dir_all(&tmp);
+        let pane = TerminalPane::spawn(&tmp, 40, 12).expect("spawn");
+        std::thread::sleep(Duration::from_millis(150));
+        pane.begin_clean_open();
+        pane.finish_clean_open();
+        std::thread::sleep(Duration::from_millis(200));
+        let snap = pane.snapshot_text().to_ascii_lowercase();
+        assert!(
+            !snap.contains("command not found"),
+            "Ctrl-L clean must not run a shell command, got: {snap:?}"
+        );
     }
 }

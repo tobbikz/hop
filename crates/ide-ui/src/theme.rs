@@ -6,6 +6,7 @@ mod theme_custom;
 pub use theme_custom::{create_custom_theme, customs, reload_customs, themes_dir, OwnedPalette};
 
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::Span;
 use std::sync::atomic::{AtomicBool, Ordering};
 use theme_custom::{active, set_active};
 
@@ -53,35 +54,35 @@ const fn rgb(r: u8, g: u8, b: u8) -> Color {
     Color::Rgb(r, g, b)
 }
 
-/// Built-ins (DataRig-inspired names + AMOLED mono).
+/// Built-ins — locked product uses OpenCode-inspired mono (index 0).
 pub static PALETTES: &[Palette] = &[
-    // 0 — AMOLED mono (legacy default)
+    // 0 — Hop mono (btop-style AMOLED: pure black surfaces, gray text ladder)
     Palette {
         id: "black",
-        label: "AMOLED mono",
+        label: "Hop mono",
         light: false,
         bg: rgb(0, 0, 0),
-        surface: rgb(10, 10, 10),
-        surface_2: rgb(18, 18, 18),
-        surface_3: rgb(26, 26, 26),
-        modal: rgb(22, 22, 22),
-        border_idle: rgb(42, 42, 42),
-        border_focus: rgb(200, 200, 200),
+        surface: rgb(0, 0, 0), // no raised panels — same as bg
+        surface_2: rgb(0, 0, 0),
+        surface_3: rgb(0, 0, 0),
+        modal: rgb(0, 0, 0),
+        border_idle: rgb(90, 90, 90),
+        border_focus: rgb(210, 210, 210),
         text: rgb(230, 230, 230),
-        muted: rgb(155, 155, 155),
-        faint: rgb(120, 120, 120),
+        muted: rgb(160, 160, 160),
+        faint: rgb(110, 110, 110),
         accent: rgb(230, 230, 230),
-        accent_warm: rgb(200, 200, 200),
-        warn: rgb(180, 180, 180),
-        danger: rgb(239, 68, 68),
-        success: rgb(34, 197, 94),
+        accent_warm: rgb(180, 180, 180),
+        warn: rgb(200, 200, 200),
+        danger: rgb(210, 210, 210),
+        success: rgb(200, 200, 200),
         info: rgb(140, 140, 140),
         syn_keyword: rgb(230, 230, 230),
-        syn_string: rgb(160, 160, 160),
+        syn_string: rgb(180, 180, 180),
         syn_number: rgb(210, 210, 210),
-        syn_comment: rgb(90, 90, 90),
-        syn_function: rgb(200, 200, 200),
-        syn_ident: rgb(180, 180, 180),
+        syn_comment: rgb(100, 100, 100),
+        syn_function: rgb(220, 220, 220),
+        syn_ident: rgb(190, 190, 190),
     },
     // 1 — AMOLED light mono (pure white / black)
     Palette {
@@ -327,8 +328,54 @@ pub fn builtin_by_id(id: &str) -> Option<&'static Palette> {
     PALETTES.iter().find(|p| p.id == id)
 }
 
-/// Product lock: Sessions ships AMOLED mono only (no light / palette cycling).
+/// Product lock: Hop ships OpenCode-inspired mono only (no palette cycling).
 pub const LOCKED_THEME_ID: &str = "black";
+
+/// tuile-style semantic roles mapped onto the active palette.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    Text,
+    Muted,
+    Faint,
+    Panel,
+    Boost,
+    Border,
+    BorderFocus,
+    Selection,
+    Accent,
+    FooterKey,
+    Success,
+    Danger,
+    Warning,
+}
+
+impl Role {
+    pub fn style(self) -> Style {
+        match self {
+            Role::Text => style_text(),
+            Role::Muted => style_muted(),
+            Role::Faint => style_faint(),
+            Role::Panel => Style::default().bg(bg()),
+            Role::Boost => Style::default().bg(bg()),
+            Role::Border => Style::default().fg(border_idle()),
+            Role::BorderFocus => Style::default().fg(border_focus()),
+            Role::Selection => style_selected(),
+            Role::Accent => style_accent().add_modifier(Modifier::BOLD),
+            Role::FooterKey => Style::default().fg(accent()).add_modifier(Modifier::BOLD),
+            Role::Success => style_ok(),
+            Role::Danger => style_err(),
+            Role::Warning => style_warn(),
+        }
+    }
+}
+
+/// Charm/tuile footer chip: accent key + faint label.
+pub fn footer_key(key: &str, label: &str) -> Vec<Span<'static>> {
+    vec![
+        Span::styled(format!(" {key} "), Role::FooterKey.style()),
+        Span::styled(format!("{label} "), Role::Faint.style()),
+    ]
+}
 
 pub fn resolve_theme_id(name: &str) -> String {
     let n = name.trim().to_ascii_lowercase();
@@ -363,7 +410,7 @@ pub fn list_themes() -> Vec<(String, String)> {
     if let Some(p) = builtin_by_id(LOCKED_THEME_ID) {
         vec![(p.id.to_string(), p.label.to_string())]
     } else {
-        vec![("black".into(), "AMOLED mono".into())]
+        vec![("black".into(), "Hop mono".into())]
     }
 }
 
@@ -392,6 +439,7 @@ pub fn modal() -> Color {
     active().modal
 }
 pub fn scrim() -> Color {
+    // AMOLED: keep overlays on true black (dim via border/text, not gray wash).
     if light() {
         rgb(220, 220, 220)
     } else {
@@ -483,10 +531,10 @@ pub fn style_title(focused: bool) -> Style {
     }
 }
 pub fn style_selected() -> Style {
-    // Soft row selection (Explorer / lists) — never a full reverse-video wash.
+    // btop-style: reverse on pure black (no gray fill).
     Style::default()
-        .fg(text())
-        .bg(surface_3())
+        .fg(bg())
+        .bg(text())
         .add_modifier(Modifier::BOLD)
 }
 

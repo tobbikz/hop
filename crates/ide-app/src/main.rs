@@ -1,15 +1,16 @@
-//! tui-sessions — SSH / RDP session manager (PTY + external RDP).
+//! Hop — SSH / RDP session manager (PTY + external RDP).
 
 mod app;
 
 use anyhow::Result;
 use clap::Parser;
+use ide_core::{PRODUCT_BIN, PRODUCT_NAME};
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "tui-sessions",
+    name = "hop",
     version,
-    about = "Keyboard-first SSH/RDP session manager for the terminal",
+    about = "Hop — keyboard-first SSH/RDP session manager",
     long_about = None
 )]
 struct Cli {
@@ -31,9 +32,9 @@ async fn main() -> Result<()> {
 
 fn init_logging() -> Result<()> {
     if let Some(mut dir) = dirs::cache_dir() {
-        dir.push("tui-sessions");
+        dir.push(PRODUCT_BIN);
         let _ = std::fs::create_dir_all(&dir);
-        let file = std::fs::File::create(dir.join("tui-sessions.log"))?;
+        let file = std::fs::File::create(dir.join(format!("{PRODUCT_BIN}.log")))?;
         tracing_subscriber::fmt()
             .with_writer(file)
             .with_env_filter(
@@ -64,7 +65,10 @@ fn print_doctor() {
     let term = std::env::var("TERM").unwrap_or_else(|_| "unset".into());
     let colorterm = std::env::var("COLORTERM").unwrap_or_else(|_| "unset".into());
 
-    println!("tui-sessions {}", env!("CARGO_PKG_VERSION"));
+    println!(
+        "{PRODUCT_NAME} {} ({PRODUCT_BIN})",
+        env!("CARGO_PKG_VERSION")
+    );
     println!("os: {} {}", std::env::consts::OS, std::env::consts::ARCH);
     println!("config dir: {config}");
     println!(

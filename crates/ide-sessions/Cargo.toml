@@ -3,7 +3,7 @@ name = "ide-sessions"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "SSH/RDP session profiles and launch helpers for tui-sessions"
+description = "SSH/RDP session profiles and launch helpers for Hop"
 
 [dependencies]
 anyhow.workspace = true

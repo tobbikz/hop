@@ -1,4 +1,4 @@
-//! User themes: `~/.config/tui-sessions/themes/<name>.toml` (DataRig-inspired).
+//! User themes: `~/.config/hop/themes/<name>.toml` (DataRig-inspired).
 
 use super::Palette;
 use anyhow::{bail, Context, Result};

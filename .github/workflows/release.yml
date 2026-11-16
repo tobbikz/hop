@@ -29,12 +29,12 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          asset="tui-sessions-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz"
-          tar -C "target/${{ matrix.target }}/release" -czf "$asset" tui-sessions
+          asset="hop-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz"
+          tar -C "target/${{ matrix.target }}/release" -czf "$asset" hop
           shasum -a 256 "$asset" > "$asset.sha256"
       - uses: softprops/action-gh-release@v2
         with:
           files: |
-            tui-sessions-*.tar.gz
-            tui-sessions-*.tar.gz.sha256
+            hop-*.tar.gz
+            hop-*.tar.gz.sha256
           generate_release_notes: true

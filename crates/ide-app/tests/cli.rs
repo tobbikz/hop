@@ -1,7 +1,7 @@
 use std::process::Command;
 
 fn bin() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_tui-sessions"))
+    Command::new(env!("CARGO_BIN_EXE_hop"))
 }
 
 #[test]
@@ -9,7 +9,7 @@ fn version_flag_prints_name_and_version() {
     let out = bin().arg("--version").output().unwrap();
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("tui-sessions"));
+    assert!(stdout.contains("hop"));
     assert!(stdout.contains(env!("CARGO_PKG_VERSION")));
 }
 
@@ -28,7 +28,7 @@ fn doctor_reports_environment() {
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     for key in [
-        "tui-sessions",
+        "Hop",
         "os:",
         "config dir:",
         "sessions:",

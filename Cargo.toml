@@ -11,10 +11,10 @@ members = [
 default-members = ["crates/ide-app"]
 
 [workspace.package]
-version = "0.6.1"
+version = "0.7.0"
 edition = "2021"
 license = "Apache-2.0"
-authors = ["tui-sessions contributors"]
+authors = ["Hop contributors"]
 rust-version = "1.85"
 
 [workspace.dependencies]

@@ -3,7 +3,7 @@ name = "ide-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Shared types and helpers for tui-sessions"
+description = "Shared types and helpers for Hop"
 
 [dependencies]
 dirs.workspace = true

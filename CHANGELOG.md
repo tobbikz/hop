@@ -3,6 +3,25 @@
 All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project follows [Semantic Versioning](https://semver.org/).
 
+## [0.7.0] - 2026-11-15
+
+### Changed
+
+- **Rebrand to Hop** — binary `hop`, display name Hop, config `~/.config/hop` (falls back to `tui-sessions` / `tui-ide`).
+- Design system: OpenCode-inspired **mono** theme + semantic `Role` tokens (Monospace Design TUI, Charm, tuile, jackin/Rivora) — [docs/TUI-DESIGN.md](docs/TUI-DESIGN.md).
+- Quiet wordmark header, tuile-style footer key chips, L0 fill, white focus borders (no phosphor green).
+- btop-style AMOLED: pure black panels (no gray fills), plain borders, reverse selection; braille only while connecting; minimal live-dot pulse.
+- `Esc` (with `` Ctrl-` `` / `F12`) returns from SSH to Profiles; remote vim Esc is unavailable while the session pane is focused.
+- Clean SSH open: discard motd/fastfetch behind overlay, Ctrl-L redraw, reveal only when a prompt is visible.
+
+### Fixed
+
+- `Ctrl-W` is required to close an SSH tab from the profile list (`w` alone no longer closes it).
+- SSH profiles with an `identity_file` connect directly (no password modal).
+- Empty password + no saved secret uses ssh-agent / default keys instead of forcing password auth.
+- Password modal opaque scrim (no Session/footer bleed) with clearer field hierarchy.
+- Auto-`clear` no longer races with typed input (`cclear`).
+
 ## [0.6.1] - 2026-11-15
 
 ### Changed

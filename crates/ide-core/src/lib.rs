@@ -1,4 +1,4 @@
-//! Shared types and helpers for tui-sessions.
+//! Shared types and helpers for Hop.
 
 use std::path::PathBuf;
 
@@ -25,15 +25,26 @@ pub enum Focus {
     Terminal,
 }
 
-/// Resolve the config directory, preferring `tui-sessions` over the legacy
-/// `tui-ide` name when only the latter exists.
+/// Resolve the config directory.
+/// Preference: `hop` → `tui-sessions` → `tui-ide` (first that exists, else create `hop`).
 pub fn config_dir() -> Option<PathBuf> {
     let base = dirs::config_dir()?;
-    let current = base.join("tui-sessions");
-    let legacy = base.join("tui-ide");
-    Some(if current.exists() || !legacy.exists() {
-        current
+    let hop = base.join("hop");
+    let sessions = base.join("tui-sessions");
+    let ide = base.join("tui-ide");
+    Some(if hop.exists() {
+        hop
+    } else if sessions.exists() {
+        sessions
+    } else if ide.exists() {
+        ide
     } else {
-        legacy
+        hop
     })
 }
+
+/// Product display name.
+pub const PRODUCT_NAME: &str = "Hop";
+
+/// CLI / binary name.
+pub const PRODUCT_BIN: &str = "hop";

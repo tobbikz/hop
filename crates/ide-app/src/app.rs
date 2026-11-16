@@ -12,7 +12,7 @@ use ide_core::{Focus, Mode};
 use ide_sessions::{ConnectOutcome, SessionKind, SessionManager};
 use ide_term::TerminalPane;
 use ide_ui::theme;
-use ide_ui::{render, Palette, RenderCtx, StatusMessage, UiState};
+use ide_ui::{render, Anim, Palette, RenderCtx, SessionOpening, StatusMessage, UiState};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use std::io::{self, Stdout};
@@ -26,6 +26,8 @@ pub struct App {
     cwd: PathBuf,
     should_quit: bool,
     status_at: Option<Instant>,
+    /// Origin for OpenCode-style spinner / pulse / shimmer.
+    anim_origin: Instant,
 }
 
 impl App {
@@ -49,9 +51,10 @@ impl App {
             cwd,
             should_quit: false,
             status_at: None,
+            anim_origin: Instant::now(),
         };
         app.set_status(
-            "Sessions · Enter connect · a SSH · A RDP · e edit · x del",
+            "Hop · Enter connect · a SSH · A RDP · e edit · x del",
             false,
         );
         Ok(app)
@@ -167,6 +170,7 @@ impl App {
             KeyCode::Esc => {
                 self.ui.session_password_input.clear();
                 self.ui.session_password_profile_id = None;
+                self.ui.busy = None;
                 self.ui.mode = Mode::Normal;
                 self.ui.focus = Focus::Sessions;
                 self.set_status("connect cancelled", false);
@@ -218,7 +222,7 @@ impl App {
             }
             KeyCode::Char(']') => self.next_ssh_tab(),
             KeyCode::Char('[') => self.prev_ssh_tab(),
-            KeyCode::Char('w') => self.close_ssh_tab(),
+            KeyCode::Char('w') | KeyCode::Char('W') if ctrl => self.close_ssh_tab(),
             KeyCode::Char(' ') if !ctrl => {
                 self.ui.show_discover = !self.ui.show_discover;
             }
@@ -232,13 +236,21 @@ impl App {
     }
 
     fn handle_terminal_key(&mut self, key: KeyEvent) -> Result<()> {
-        // Single host escape hatch: every other key belongs to the remote PTY
-        // (Esc, Ctrl-[, Ctrl-W and Ctrl-P are used by vim/readline/tmux).
-        let host_escape = matches!(key.code, KeyCode::F(12))
+        // Host chrome: Esc / Ctrl-` / F12 → Profiles. All other keys go to the PTY.
+        // Trade-off: remote vim Esc is unavailable while the session pane is focused.
+        let host_escape = matches!(key.code, KeyCode::Esc | KeyCode::F(12))
             || (key.modifiers.contains(KeyModifiers::CONTROL)
                 && matches!(key.code, KeyCode::Char('`')));
+        let opening = self.ui.session_opening.is_some();
         if host_escape {
+            if opening {
+                self.finish_opening_local_only();
+            }
             self.focus_profiles();
+        } else if opening {
+            // Dismiss gate without injecting shell commands; then forward the key.
+            self.finish_opening_local_only();
+            self.forward_key(key)?;
         } else {
             self.forward_key(key)?;
         }
@@ -287,7 +299,7 @@ impl App {
     fn apply_locked_theme(&mut self) {
         self.config.theme.name = theme::LOCKED_THEME_ID.to_string();
         theme::set_mode_name(theme::LOCKED_THEME_ID);
-        self.set_status("theme locked · AMOLED mono", false);
+        self.set_status("theme locked · Hop mono", false);
     }
 
     fn begin_add(&mut self, ssh: bool) {
@@ -416,29 +428,67 @@ impl App {
             SessionKind::Rdp => {
                 let cols = 80u16;
                 let rows = term_rows.max(6);
+                self.ui.busy = Some("launching RDP…".into());
                 match self.sessions.connect_selected(&self.cwd, cols, rows) {
                     Ok(ConnectOutcome::RdpSpawned { label }) => {
                         self.sessions.clear_failed(&profile.id);
                         self.ui.show_discover = false;
+                        self.ui.busy = None;
                         self.set_status(format!("rdp launched · {label}"), false);
                     }
-                    Ok(ConnectOutcome::SshAttached { .. }) => {}
+                    Ok(ConnectOutcome::SshAttached { .. }) => {
+                        self.ui.busy = None;
+                    }
                     Err(e) => {
                         self.sessions.mark_failed(&profile.id);
+                        self.ui.busy = None;
                         self.set_status(format!("session: {e}"), true);
                     }
                 }
             }
             SessionKind::Ssh => {
                 self.ui.show_discover = false;
+                // Key-based profiles skip the password modal and go straight to the PTY.
+                if !profile.identity_file.trim().is_empty() {
+                    let cols = 100u16;
+                    let rows = term_rows.max(12);
+                    self.ui.busy = Some("connecting…".into());
+                    match self.sessions.connect_selected(&self.cwd, cols, rows) {
+                        Ok(ConnectOutcome::SshAttached { label }) => {
+                            self.sessions.clear_failed(&profile.id);
+                            self.ui.focus = Focus::Terminal;
+                            self.ui.busy = None;
+                            self.ui.session_opening = Some(SessionOpening {
+                                label: label.clone(),
+                                started: Instant::now(),
+                                clean_sent: false,
+                                clean_at: None,
+                                clear_written: false,
+                                nudge_sent: false,
+                                last_bytes: 0,
+                                quiet_since: None,
+                            });
+                            self.set_status(format!("ssh · {label}"), false);
+                        }
+                        Ok(ConnectOutcome::RdpSpawned { .. }) => {
+                            self.ui.busy = None;
+                        }
+                        Err(e) => {
+                            self.sessions.mark_failed(&profile.id);
+                            self.ui.busy = None;
+                            self.set_status(format!("session: {e}"), true);
+                        }
+                    }
+                    return;
+                }
                 self.ui.session_password_profile_id = Some(profile.id.clone());
                 self.ui.session_password_input.clear();
                 self.ui.session_password_remember = true;
                 self.ui.mode = Mode::SessionPassword;
                 let hint = if ide_sessions::has_password(&profile.id) {
-                    "password · Enter = saved · Tab remember · type to replace"
+                    "Enter = saved password · type to replace · empty clears to agent · Tab remember"
                 } else {
-                    "password · Enter connect · Tab remember"
+                    "Enter = ssh-agent / keys · type password · Tab remember"
                 };
                 self.set_status(hint, false);
             }
@@ -458,14 +508,9 @@ impl App {
         };
         let typed = self.ui.session_password_input.clone();
         let remember = self.ui.session_password_remember;
+        // Empty input: use a saved password if present, otherwise ssh-agent / default keys.
         let password = if typed.is_empty() {
-            match ide_sessions::get_password(&profile_id) {
-                Some(pw) => Some(pw),
-                None => {
-                    self.set_status("enter a password", true);
-                    return Ok(());
-                }
-            }
+            ide_sessions::get_password(&profile_id)
         } else {
             Some(typed)
         };
@@ -473,6 +518,7 @@ impl App {
         // Approximate main pane; the event loop resizes to the exact layout next tick.
         let cols = 100u16;
         let rows = term_rows.max(12);
+        self.ui.busy = Some("connecting…".into());
         match self
             .sessions
             .connect_selected_with_password(&self.cwd, cols, rows, password.clone())
@@ -493,7 +539,9 @@ impl App {
                 let failed = snap.contains("permission denied")
                     || snap.contains("connection refused")
                     || snap.contains("authentication failed");
+                self.ui.busy = None;
                 if failed {
+                    self.ui.session_opening = None;
                     self.sessions.mark_failed(&profile_id);
                     let _ = ide_sessions::clear_password(&profile_id);
                     self.ui.session_password_input.clear();
@@ -505,6 +553,16 @@ impl App {
                         true,
                     );
                 } else if remember {
+                    self.ui.session_opening = Some(SessionOpening {
+                        label: label.clone(),
+                        started: Instant::now(),
+                        clean_sent: false,
+                        clean_at: None,
+                        clear_written: false,
+                        nudge_sent: false,
+                        last_bytes: 0,
+                        quiet_since: None,
+                    });
                     if let Some(pw) = password {
                         match ide_sessions::set_password(&profile_id, &pw) {
                             Ok(()) => {
@@ -517,21 +575,106 @@ impl App {
                     }
                     self.ui.session_password_profile_id = None;
                 } else {
+                    self.ui.session_opening = Some(SessionOpening {
+                        label: label.clone(),
+                        started: Instant::now(),
+                        clean_sent: false,
+                        clean_at: None,
+                        clear_written: false,
+                        nudge_sent: false,
+                        last_bytes: 0,
+                        quiet_since: None,
+                    });
                     self.ui.session_password_profile_id = None;
                     self.set_status(format!("ssh · {label}"), false);
                 }
             }
             Ok(ConnectOutcome::RdpSpawned { label }) => {
+                self.ui.busy = None;
                 self.ui.mode = Mode::Normal;
                 self.set_status(format!("rdp launched · {label}"), false);
             }
             Err(e) => {
+                self.ui.busy = None;
                 self.sessions.mark_failed(&profile_id);
                 self.ui.mode = Mode::SessionPassword;
                 self.set_status(format!("session: {e}"), true);
             }
         }
         Ok(())
+    }
+
+    /// Key-dismiss: drop overlay with a local wipe only (no shell command injection).
+    fn finish_opening_local_only(&mut self) {
+        if let Some(pane) = self.sessions.active_ssh_pane() {
+            pane.hard_reset_screen();
+            pane.set_discard_parser(false);
+            let _ = pane.write_bytes(b"\x0c");
+        }
+        self.ui.session_opening = None;
+    }
+
+    /// Discard motd locally from attach; Ctrl-L for prompt — never type `clear\\r`.
+    fn tick_clean_open(&mut self) {
+        let Some(opening) = self.ui.session_opening.as_mut() else {
+            return;
+        };
+        let Some(pane) = self.sessions.active_ssh_pane() else {
+            self.ui.session_opening = None;
+            return;
+        };
+
+        // Discard from the first tick so fastfetch never enters the local VT.
+        if !opening.clean_sent {
+            pane.begin_clean_open();
+            opening.clean_sent = true;
+            opening.clean_at = Some(Instant::now());
+        }
+
+        let bytes = pane.bytes_read();
+        let rows = pane.non_empty_rows();
+        let elapsed = opening.started.elapsed();
+        let now = Instant::now();
+
+        if bytes != opening.last_bytes {
+            opening.last_bytes = bytes;
+            opening.quiet_since = None;
+        } else if bytes > 0 && opening.quiet_since.is_none() {
+            opening.quiet_since = Some(now);
+        }
+
+        let quiet = opening
+            .quiet_since
+            .is_some_and(|t| t.elapsed() >= Duration::from_millis(400));
+        let ready =
+            (quiet && elapsed >= Duration::from_millis(450)) || elapsed >= Duration::from_secs(2);
+
+        if ready && !opening.clear_written {
+            pane.finish_clean_open();
+            opening.clear_written = true;
+            opening.clean_at = Some(now);
+            return;
+        }
+
+        if opening.clear_written {
+            let since = opening
+                .clean_at
+                .map(|t| t.elapsed())
+                .unwrap_or(Duration::ZERO);
+            // Ctrl-L sometimes leaves a blank VT until the shell reprints the prompt.
+            if rows == 0 && !opening.nudge_sent && since >= Duration::from_millis(200) {
+                let _ = pane.write_bytes(b"\r");
+                opening.nudge_sent = true;
+                opening.clean_at = Some(now);
+                return;
+            }
+            // Reveal only once a prompt (or any text) is visible.
+            let has_prompt = rows >= 1 && since >= Duration::from_millis(80);
+            let give_up = elapsed >= Duration::from_secs(4);
+            if has_prompt || give_up {
+                self.ui.session_opening = None;
+            }
+        }
     }
 
     fn forward_key(&self, key: KeyEvent) -> Result<()> {
@@ -643,7 +786,7 @@ async fn event_loop(
         }
 
         let size = terminal.size()?;
-        // Header + footer + pane borders ≈ 4 rows; sidebar 34 + borders 2.
+        // Header + footer ≈ 2 rows; sidebar 32 + pane borders ≈ 2 → PTY width −34.
         app.expire_status();
         let term_rows = size.height.saturating_sub(4).max(12);
         let cols = size.width.saturating_sub(34).max(40);
@@ -659,6 +802,10 @@ async fn event_loop(
             .map(|name| tab_caption(name))
             .collect();
         let active = app.sessions.active_ssh;
+
+        // Settle → clear+reset → then snapshot (so we never paint stale fastfetch).
+        app.tick_clean_open();
+
         let styled = app
             .sessions
             .active_ssh_pane()
@@ -670,6 +817,7 @@ async fn event_loop(
             .map(|p| p.visible_lines())
             .unwrap_or_default();
 
+        let anim = Anim::new(app.anim_origin);
         terminal.draw(|frame| {
             render(
                 frame,
@@ -680,6 +828,7 @@ async fn event_loop(
                     terminal_lines: Some(&lines),
                     session_tab_labels: &labels,
                     session_tab_active: active,
+                    anim,
                 },
             );
         })?;

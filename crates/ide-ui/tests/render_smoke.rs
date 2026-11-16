@@ -2,9 +2,10 @@
 
 use ide_core::{Focus, Mode};
 use ide_sessions::{SessionManager, SessionProfile};
-use ide_ui::{render, Palette, RenderCtx, StatusMessage, UiState};
+use ide_ui::{render, Anim, Palette, RenderCtx, StatusMessage, UiState};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
+use std::time::Duration;
 
 fn manager() -> SessionManager {
     let mut mgr = SessionManager {
@@ -37,6 +38,10 @@ fn draw(ui: &UiState, sessions: &SessionManager, width: u16, height: u16) -> Str
                     terminal_lines: None,
                     session_tab_labels: &[],
                     session_tab_active: 0,
+                    anim: Anim {
+                        enabled: false,
+                        elapsed: Duration::from_millis(0),
+                    },
                 },
             );
         })
@@ -56,7 +61,7 @@ fn normal_view_has_header_list_and_hints() {
     let sessions = manager();
     for (w, h) in [(80, 24), (120, 40), (50, 20)] {
         let text = draw(&ui, &sessions, w, h);
-        assert!(text.contains("Sessions"), "missing header at {w}x{h}");
+        assert!(text.contains("Hop"), "missing header at {w}x{h}");
         assert!(text.contains("prod-web"), "missing profile at {w}x{h}");
         assert!(text.contains("2 profiles"), "missing count at {w}x{h}");
     }
@@ -83,7 +88,19 @@ fn overlays_render_without_panicking() {
 
     ui.mode = Mode::SessionPassword;
     ui.session_password_input = "hunter2".into();
-    assert!(draw(&ui, &sessions, 100, 32).contains("SSH login password"));
+    ui.session_password_profile_id = Some(sessions.profiles[0].id.clone());
+    let pw = draw(&ui, &sessions, 100, 32);
+    assert!(pw.contains("SSH login"));
+    assert!(pw.contains("remember password"));
+    // Opaque scrim: Session empty-state copy must not bleed into the modal.
+    assert!(
+        !pw.contains("No passwords in TOML"),
+        "session empty-state bled through password modal"
+    );
+    assert!(
+        !pw.contains("Connect a profile from the left"),
+        "session hint bled through password modal"
+    );
 
     ui.mode = Mode::ConfirmDelete;
     assert!(draw(&ui, &sessions, 100, 32).contains("Delete profile"));

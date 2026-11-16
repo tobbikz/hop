@@ -1,9 +1,12 @@
 //! Session list, live PTY pane, overlays and command palette.
 
+mod anim;
 mod palette;
 pub mod theme;
 
+pub use anim::{animations_enabled, Anim};
 pub use palette::{Palette, PaletteItem, PaletteMode};
+// SessionOpening is defined below and used by ide-app.
 
 use ide_core::{Focus, Mode};
 use ide_sessions::SessionManager;
@@ -35,6 +38,26 @@ pub struct UiState {
     pub session_password_profile_id: Option<String>,
     /// On password modal: remember after successful connect.
     pub session_password_remember: bool,
+    /// Real loading work in progress — braille spinner only while set.
+    pub busy: Option<String>,
+    /// After SSH attach: soft “opening” gate so the PTY doesn’t flash empty.
+    pub session_opening: Option<SessionOpening>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionOpening {
+    pub label: String,
+    pub started: std::time::Instant,
+    /// Drain window started (discard late motd + wipe local VT).
+    pub clean_sent: bool,
+    pub clean_at: Option<std::time::Instant>,
+    /// Remote Ctrl-L / redraw issued after the drain window.
+    pub clear_written: bool,
+    /// Empty Enter sent once if Ctrl-L left the screen blank.
+    pub nudge_sent: bool,
+    /// Last PTY byte count — used to wait out fastfetch/motd before clearing.
+    pub last_bytes: usize,
+    pub quiet_since: Option<std::time::Instant>,
 }
 
 impl Default for UiState {
@@ -49,6 +72,8 @@ impl Default for UiState {
             session_password_input: String::new(),
             session_password_profile_id: None,
             session_password_remember: true,
+            busy: None,
+            session_opening: None,
         }
     }
 }
@@ -61,10 +86,17 @@ pub struct RenderCtx<'a> {
     pub terminal_lines: Option<&'a [String]>,
     pub session_tab_labels: &'a [String],
     pub session_tab_active: usize,
+    /// OpenCode-style motion clock (spinner / pulse / shimmer).
+    pub anim: Anim,
 }
 
 pub fn render(frame: &mut Frame, ctx: RenderCtx<'_>) {
     let size = frame.area();
+    // jackin L0: full-bleed app background before chrome.
+    frame.render_widget(
+        Block::default().style(Style::default().bg(theme::bg())),
+        size,
+    );
     let root = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -88,6 +120,7 @@ pub fn render(frame: &mut Frame, ctx: RenderCtx<'_>) {
         cols[0],
         ctx.sessions,
         ctx.ui.focus == Focus::Sessions,
+        ctx.anim,
     );
     render_terminal(frame, cols[1], &ctx);
     render_footer(frame, root[2], &ctx);
@@ -139,85 +172,129 @@ pub fn render(frame: &mut Frame, ctx: RenderCtx<'_>) {
 }
 
 fn render_header(frame: &mut Frame, area: Rect, ctx: &RenderCtx<'_>) {
+    // OpenCode-quiet masthead: wordmark + muted meta.
     let n = ctx.sessions.profiles.len();
     let live = ctx.sessions.live_ssh.len() + ctx.sessions.live_rdp.len();
     let profile_word = if n == 1 { "profile" } else { "profiles" };
     let state = if live == 0 {
         "idle".to_string()
     } else {
-        format!("{live} connected")
+        format!("{live} live")
     };
 
     let mut spans = vec![
         Span::styled(
-            " Sessions ",
+            " Hop ",
             Style::default()
                 .fg(theme::text())
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(format!(" {n} {profile_word} "), theme::style_muted()),
-        Span::styled("· ", theme::style_faint()),
-        Span::styled(
+        Span::styled(format!(" {n} {profile_word} "), theme::Role::Faint.style()),
+        Span::styled("· ", theme::Role::Faint.style()),
+    ];
+    // Braille only while something is actually loading.
+    if let Some(busy) = ctx.ui.busy.as_deref() {
+        spans.push(Span::styled(
+            format!("{} ", ctx.anim.braille()),
+            theme::Role::Muted.style(),
+        ));
+        spans.push(Span::styled(format!("{busy} "), theme::Role::Muted.style()));
+    } else {
+        spans.push(Span::styled(
             format!("{state} "),
             if live > 0 {
-                theme::style_accent()
+                theme::Role::Muted.style()
             } else {
-                theme::style_faint()
+                theme::Role::Faint.style()
             },
-        ),
-    ];
+        ));
+    }
 
     let left_w: usize = spans.iter().map(|s| s.content.width()).sum();
-    let theme_label = format!("{} ", theme::current_label());
-    let right_w = theme_label.width();
-    let pad = (area.width as usize).saturating_sub(left_w + right_w);
+    let right = " mono ";
+    let pad = (area.width as usize).saturating_sub(left_w + right.width());
     if pad >= 2 {
         spans.push(Span::raw(" ".repeat(pad)));
-        spans.push(Span::styled(theme_label, theme::style_faint()));
+        spans.push(Span::styled(right, theme::Role::Faint.style()));
     }
 
     frame.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(theme::surface())),
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(theme::bg())),
         area,
     );
 }
 
 fn render_footer(frame: &mut Frame, area: Rect, ctx: &RenderCtx<'_>) {
-    let line = match &ctx.ui.status {
-        Some(status) => {
-            let (icon, style) = if status.error {
-                (" ! ", theme::style_err())
-            } else {
-                (" ✓ ", theme::style_ok())
-            };
-            Line::from(vec![
-                Span::styled(icon, style),
-                Span::styled(status.text.clone(), theme::style_text()),
-            ])
+    // Monospace footer command bar + tuile footer-key chips (Charm-quiet).
+    let line = match (&ctx.ui.busy, &ctx.ui.status) {
+        (Some(busy), _) => Line::from(vec![
+            Span::styled(
+                format!(" {} ", ctx.anim.braille()),
+                theme::Role::Muted.style(),
+            ),
+            Span::styled(busy.clone(), theme::Role::Muted.style()),
+        ]),
+        (_, Some(status)) if status.error => Line::from(vec![
+            Span::styled(" ! ", theme::Role::Danger.style()),
+            Span::styled(status.text.clone(), theme::Role::Danger.style()),
+        ]),
+        (_, Some(status)) => Line::from(vec![
+            Span::styled(" · ", theme::Role::Faint.style()),
+            Span::styled(status.text.clone(), theme::Role::Muted.style()),
+        ]),
+        _ if ctx.ui.show_discover => {
+            let mut spans = theme::footer_key("Space", "close");
+            spans.extend(theme::footer_key("Esc", "close"));
+            Line::from(spans)
         }
-        None if ctx.ui.show_discover => Line::from(Span::styled(
-            " Space / Esc close discover ",
-            theme::style_faint(),
-        )),
-        None if ctx.ui.focus == Focus::Terminal => Line::from(Span::styled(
-            " typing in SSH · Ctrl-` / F12 back to profiles · tabs from the list ",
-            theme::style_faint(),
-        )),
-        None => Line::from(Span::styled(
-            " Enter connect · a/A add · e edit · x delete · ]/[ tabs · Space keys · Ctrl-P ",
-            theme::style_faint(),
-        )),
+        _ if ctx.ui.focus == Focus::Terminal => {
+            let mut spans = theme::footer_key("Esc", "profiles");
+            spans.extend(theme::footer_key("Ctrl-`", "profiles"));
+            spans.extend(theme::footer_key("F12", "profiles"));
+            spans.push(Span::styled(
+                " · keys go to SSH ",
+                theme::Role::Faint.style(),
+            ));
+            Line::from(spans)
+        }
+        _ => {
+            let mut spans = Vec::new();
+            for (k, l) in [
+                ("Enter", "connect"),
+                ("a/A", "add"),
+                ("e", "edit"),
+                ("x", "del"),
+                ("]/[", "tabs"),
+                ("Space", "keys"),
+                ("Ctrl-P", "palette"),
+            ] {
+                spans.extend(theme::footer_key(k, l));
+            }
+            Line::from(spans)
+        }
     };
     frame.render_widget(
-        Paragraph::new(line).style(Style::default().bg(theme::surface())),
+        Paragraph::new(line).style(Style::default().bg(theme::bg())),
         area,
     );
 }
 
-fn render_profiles(frame: &mut Frame, area: Rect, sessions: &SessionManager, focused: bool) {
+fn render_profiles(
+    frame: &mut Frame,
+    area: Rect,
+    sessions: &SessionManager,
+    focused: bool,
+    anim: Anim,
+) {
     let border = theme::border(focused);
     let inner_w = area.width.saturating_sub(2) as usize;
     let mut items: Vec<ListItem> = Vec::new();
+    // Minimal pulse: same glyph ●, only faint↔muted brightness.
+    let pulse = if anim.pulse_phase().is_multiple_of(2) {
+        theme::faint()
+    } else {
+        theme::muted()
+    };
 
     if sessions.profiles.is_empty() {
         items.push(ListItem::new(Line::from("")));
@@ -230,8 +307,8 @@ fn render_profiles(frame: &mut Frame, area: Rect, sessions: &SessionManager, foc
             theme::style_faint(),
         )));
         items.push(ListItem::new(Span::styled(
-            " ~/.config/tui-sessions/sessions.toml",
-            theme::style_faint(),
+            " ~/.config/hop/sessions.toml",
+            theme::Role::Faint.style(),
         )));
     } else {
         for (i, p) in sessions.profiles.iter().enumerate() {
@@ -267,36 +344,40 @@ fn render_profiles(frame: &mut Frame, area: Rect, sessions: &SessionManager, foc
             let used = 1 + 1 + name_w + target.width() + 2 + 1;
             let pad = inner_w.saturating_sub(used);
 
-            let row_bg = if selected {
+            // btop AMOLED: no gray row wash — rail + brightness (reverse when focused).
+            let (row_bg, name_fg, target_fg) = if selected && focused {
+                (theme::text(), theme::bg(), theme::bg())
+            } else if selected {
+                (theme::bg(), theme::text(), theme::muted())
+            } else {
+                (theme::bg(), theme::muted(), theme::faint())
+            };
+            let bar_style = Style::default().bg(row_bg).fg(if selected {
                 if focused {
-                    theme::surface_3()
+                    theme::bg()
                 } else {
-                    theme::surface_2()
+                    theme::text()
                 }
             } else {
-                theme::surface()
-            };
-            let bar_style =
-                Style::default()
-                    .bg(row_bg)
-                    .fg(if selected { theme::accent() } else { row_bg });
+                row_bg
+            });
             let name_style = Style::default()
                 .bg(row_bg)
-                .fg(if selected {
-                    theme::text()
-                } else {
-                    theme::muted()
-                })
-                .add_modifier(if selected && focused {
+                .fg(name_fg)
+                .add_modifier(if selected {
                     Modifier::BOLD
                 } else {
                     Modifier::empty()
                 });
-            let target_style = Style::default().bg(row_bg).fg(theme::faint());
+            let target_style = Style::default().bg(row_bg).fg(target_fg);
             let dot_style = Style::default().bg(row_bg).fg(if live {
-                theme::accent()
+                if focused && selected {
+                    theme::bg()
+                } else {
+                    pulse
+                }
             } else if failed {
-                theme::danger()
+                theme::faint()
             } else {
                 row_bg
             });
@@ -321,12 +402,12 @@ fn render_profiles(frame: &mut Frame, area: Rect, sessions: &SessionManager, foc
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
+                    .border_type(BorderType::Plain)
                     .title(Span::styled(" Profiles ", theme::style_title(focused)))
                     .border_style(Style::default().fg(border))
-                    .style(Style::default().bg(theme::surface())),
+                    .style(Style::default().bg(theme::bg())),
             )
-            .style(Style::default().bg(theme::surface())),
+            .style(Style::default().bg(theme::bg())),
         area,
     );
 }
@@ -334,22 +415,27 @@ fn render_profiles(frame: &mut Frame, area: Rect, sessions: &SessionManager, foc
 fn terminal_title(ctx: &RenderCtx<'_>, focused: bool) -> Line<'static> {
     if ctx.session_tab_labels.is_empty() {
         return Line::from(Span::styled(
-            " Session · Enter on a profile to connect ",
+            " Session · Enter on a profile to hop in ",
             theme::style_title(focused),
         ));
     }
-    let mut spans = vec![Span::styled(" SSH ", theme::style_faint())];
+    let mut spans = vec![Span::styled(" SSH ", theme::Role::Faint.style())];
     for (i, label) in ctx.session_tab_labels.iter().enumerate() {
         if i > 0 {
             spans.push(Span::styled("│", theme::style_faint()));
         }
         if i == ctx.session_tab_active {
+            // Soft raised tab (OpenCode quiet) — invert only when the PTY owns focus.
             let style = if focused {
-                theme::style_pill_on(theme::accent())
+                Style::default()
+                    .fg(theme::bg())
+                    .bg(theme::text())
+                    .add_modifier(Modifier::BOLD)
             } else {
+                // Unfocused active tab: bright text on black (no gray chip).
                 Style::default()
                     .fg(theme::text())
-                    .bg(theme::surface_3())
+                    .bg(theme::bg())
                     .add_modifier(Modifier::BOLD)
             };
             spans.push(Span::styled(format!(" {label} "), style));
@@ -357,7 +443,8 @@ fn terminal_title(ctx: &RenderCtx<'_>, focused: bool) -> Line<'static> {
             spans.push(Span::styled(format!(" {label} "), theme::style_muted()));
         }
     }
-    spans.push(Span::styled("  Ctrl-` profiles ", theme::style_faint()));
+    spans.push(Span::styled("  Esc ", theme::Role::FooterKey.style()));
+    spans.push(Span::styled("profiles ", theme::Role::Faint.style()));
     Line::from(spans)
 }
 
@@ -368,6 +455,52 @@ fn render_terminal(frame: &mut Frame, area: Rect, ctx: &RenderCtx<'_>) {
 
     let styled = ctx.terminal_styled.unwrap_or(&[]);
     let lines = ctx.terminal_lines.unwrap_or(&[]);
+
+    // Hold this overlay for the entire SessionOpening lifetime — never paint
+    // fastfetch/motd underneath while clean-open is still running.
+    if let Some(opening) = ctx.ui.session_opening.as_ref() {
+        let phase = if opening.clear_written {
+            ("ready", "clean prompt…")
+        } else if opening.clean_sent {
+            ("clearing shell", "dropping motd…")
+        } else {
+            ("opening session", "waiting for shell…")
+        };
+        let hint = vec![
+            Line::from(""),
+            Line::from(vec![
+                Span::styled(
+                    format!("  {}  ", ctx.anim.braille()),
+                    theme::Role::Muted.style(),
+                ),
+                Span::styled(
+                    phase.0,
+                    Style::default()
+                        .fg(theme::text())
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(""),
+            Line::from(Span::styled(
+                format!("  {}", opening.label),
+                theme::style_muted(),
+            )),
+            Line::from(Span::styled(format!("  {}", phase.1), theme::style_faint())),
+        ];
+        frame.render_widget(
+            Paragraph::new(hint).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Plain)
+                    .title(title)
+                    .border_style(Style::default().fg(border))
+                    .style(Style::default().bg(theme::bg())),
+            ),
+            area,
+        );
+        return;
+    }
+
     if styled.is_empty() && lines.is_empty() {
         let hint = vec![
             Line::from(""),
@@ -406,7 +539,7 @@ fn render_terminal(frame: &mut Frame, area: Rect, ctx: &RenderCtx<'_>) {
             Paragraph::new(hint).block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
+                    .border_type(BorderType::Plain)
                     .title(title)
                     .border_style(Style::default().fg(border))
                     .style(Style::default().bg(theme::bg())),
@@ -428,7 +561,7 @@ fn render_terminal(frame: &mut Frame, area: Rect, ctx: &RenderCtx<'_>) {
         Paragraph::new(text).block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
+                .border_type(BorderType::Plain)
                 .title(title)
                 .border_style(Style::default().fg(border))
                 .padding(Padding::new(1, 1, 0, 0))
@@ -507,8 +640,8 @@ fn render_discover(frame: &mut Frame, screen: Rect, ui: &UiState) {
 
     let entries: &[(&str, &str)] = if ui.focus == Focus::Terminal {
         &[
-            ("Ctrl-` / F12", "back to profiles"),
-            ("all keys", "go to the SSH session"),
+            ("Esc / Ctrl-` / F12", "back to profiles"),
+            ("other keys", "go to the SSH session"),
         ]
     } else {
         &[
@@ -542,18 +675,16 @@ fn render_discover(frame: &mut Frame, screen: Rect, ui: &UiState) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        .border_type(BorderType::Plain)
         .border_style(Style::default().fg(theme::accent()))
-        .style(Style::default().bg(theme::modal()))
+        .style(Style::default().bg(theme::bg()))
         .title(Span::styled(
-            format!(" discover · {scope} "),
-            Style::default()
-                .fg(theme::accent())
-                .add_modifier(Modifier::BOLD),
+            format!(" hop · discover · {scope} "),
+            theme::Role::Accent.style(),
         ))
         .title_bottom(Line::from(Span::styled(
             " space / esc ",
-            theme::style_faint(),
+            theme::Role::Faint.style(),
         )));
     let inner = block.inner(area);
     frame.render_widget(block, area);

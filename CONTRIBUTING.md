@@ -1,4 +1,4 @@
-# Contributing to tui-sessions
+# Contributing to Hop
 
 Thanks for taking the time to contribute.
 
@@ -11,8 +11,8 @@ Thanks for taking the time to contribute.
 ## Development setup
 
 ```bash
-git clone https://github.com/tobbikz/tui-sessions.git
-cd tui-sessions
+git clone https://github.com/tobbikz/hop.git
+cd hop
 cargo build
 ```
 

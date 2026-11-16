@@ -1,6 +1,6 @@
 //! Remote session profiles (SSH PTY + RDP external launcher).
 //!
-//! SSOT file: `~/.config/tui-sessions/sessions.toml` (no passwords).
+//! SSOT file: `~/.config/hop/sessions.toml` (no passwords).
 //! Optional passwords: `sessions-secrets.toml` (0600) — MobaXterm-style save.
 
 mod secrets;
@@ -130,7 +130,7 @@ impl SessionProfile {
         }
 
         let id = self.identity_file.trim();
-        if password_login || id.is_empty() {
+        if password_login {
             // No default identities → same as a server that only wants password.
             args.push("-o".into());
             args.push("IdentitiesOnly=yes".into());
@@ -138,13 +138,14 @@ impl SessionProfile {
             args.push("PreferredAuthentications=password,keyboard-interactive".into());
             args.push("-o".into());
             args.push("PubkeyAuthentication=no".into());
-        } else {
+        } else if !id.is_empty() {
             let path = expand_tilde(id);
             args.push("-o".into());
             args.push("IdentitiesOnly=yes".into());
             args.push("-i".into());
             args.push(path.display().to_string());
         }
+        // else: plain `ssh` — agent + default keys.
 
         let jump = self.jump_host.trim();
         if !jump.is_empty() {
@@ -397,8 +398,9 @@ impl SessionManager {
                     );
                 }
                 let pw = password.filter(|s| !s.is_empty());
-                // Password login → never offer default id_* keys (avoids passphrase prompts).
-                let password_login = pw.is_some() || profile.identity_file.trim().is_empty();
+                // Password login disables default id_* keys (avoids key-passphrase prompts).
+                // No password + no identity_file → normal ssh (agent / default keys).
+                let password_login = pw.is_some();
                 let ssh_args = profile.ssh_args_with_options(password_login)?;
                 let pane = if let Some(ref pass) = pw {
                     if which("sshpass").is_some() {
@@ -650,6 +652,17 @@ mod tests {
         assert!(args.iter().any(|a| a == "-p"));
         assert!(args.iter().any(|a| a == "2222"));
         assert!(args.ends_with(&["ops@10.0.0.5".into()]));
+    }
+
+    #[test]
+    fn ssh_args_agent_vs_password_login() {
+        let p = SessionProfile::new_ssh("home", "127.0.0.1", "me");
+        let agent = p.ssh_args_with_options(false).unwrap();
+        assert!(!agent.iter().any(|a| a.contains("PubkeyAuthentication=no")));
+        assert!(!agent.iter().any(|a| a == "-i"));
+
+        let pw = p.ssh_args_with_options(true).unwrap();
+        assert!(pw.iter().any(|a| a.contains("PubkeyAuthentication=no")));
     }
 
     #[test]

@@ -3,10 +3,10 @@ name = "ide-app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "tui-sessions binary: UI event loop and app state"
+description = "Hop binary: UI event loop and app state"
 
 [[bin]]
-name = "tui-sessions"
+name = "hop"
 path = "src/main.rs"
 
 [dependencies]
