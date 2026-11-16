@@ -3,6 +3,12 @@
 All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project follows [Semantic Versioning](https://semver.org/).
 
+## [0.7.1] - 2026-11-15
+
+### Fixed
+
+- SSH clean open: discard motd as soon as the session attaches (including during auth wait) and only reveal a prompt-sized screen — fastfetch no longer sticks after connect.
+
 ## [0.7.0] - 2026-11-15
 
 ### Changed

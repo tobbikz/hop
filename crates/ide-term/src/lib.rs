@@ -331,6 +331,11 @@ impl TerminalPane {
     pub fn snapshot_text(&self) -> String {
         self.parser.lock().screen().contents()
     }
+
+    /// Raw PTY bytes (includes discarded motd) — use for auth failure sniffing.
+    pub fn raw_output(&self) -> String {
+        self.reader_buf.lock().clone()
+    }
 }
 
 #[derive(Debug, Clone)]

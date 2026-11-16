@@ -55,6 +55,8 @@ pub struct SessionOpening {
     pub clear_written: bool,
     /// Empty Enter sent once if Ctrl-L left the screen blank.
     pub nudge_sent: bool,
+    /// One extra wipe if a banner still painted after Ctrl-L.
+    pub rewipe_done: bool,
     /// Last PTY byte count — used to wait out fastfetch/motd before clearing.
     pub last_bytes: usize,
     pub quiet_since: Option<std::time::Instant>,

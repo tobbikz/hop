@@ -458,16 +458,7 @@ impl App {
                             self.sessions.clear_failed(&profile.id);
                             self.ui.focus = Focus::Terminal;
                             self.ui.busy = None;
-                            self.ui.session_opening = Some(SessionOpening {
-                                label: label.clone(),
-                                started: Instant::now(),
-                                clean_sent: false,
-                                clean_at: None,
-                                clear_written: false,
-                                nudge_sent: false,
-                                last_bytes: 0,
-                                quiet_since: None,
-                            });
+                            self.begin_session_opening(label.clone());
                             self.set_status(format!("ssh · {label}"), false);
                         }
                         Ok(ConnectOutcome::RdpSpawned { .. }) => {
@@ -529,12 +520,16 @@ impl App {
                 self.ui.focus = Focus::Terminal;
                 self.ui.session_password_input.clear();
                 self.ui.mode = Mode::Normal;
+                // Discard motd into the void immediately (auth sniff uses raw_output).
+                if let Some(pane) = self.sessions.active_ssh_pane() {
+                    pane.begin_clean_open();
+                }
                 // Give sshpass/ssh a moment; only persist if auth did not fail.
                 std::thread::sleep(Duration::from_millis(450));
                 let snap = self
                     .sessions
                     .active_ssh_pane()
-                    .map(|p| p.snapshot_text().to_ascii_lowercase())
+                    .map(|p| p.raw_output().to_ascii_lowercase())
                     .unwrap_or_default();
                 let failed = snap.contains("permission denied")
                     || snap.contains("connection refused")
@@ -542,6 +537,9 @@ impl App {
                 self.ui.busy = None;
                 if failed {
                     self.ui.session_opening = None;
+                    if let Some(pane) = self.sessions.active_ssh_pane() {
+                        pane.set_discard_parser(false);
+                    }
                     self.sessions.mark_failed(&profile_id);
                     let _ = ide_sessions::clear_password(&profile_id);
                     self.ui.session_password_input.clear();
@@ -552,41 +550,25 @@ impl App {
                         "auth failed · password is case-sensitive · type again",
                         true,
                     );
-                } else if remember {
-                    self.ui.session_opening = Some(SessionOpening {
-                        label: label.clone(),
-                        started: Instant::now(),
-                        clean_sent: false,
-                        clean_at: None,
-                        clear_written: false,
-                        nudge_sent: false,
-                        last_bytes: 0,
-                        quiet_since: None,
-                    });
-                    if let Some(pw) = password {
-                        match ide_sessions::set_password(&profile_id, &pw) {
-                            Ok(()) => {
-                                self.set_status(format!("ssh · {label} · password saved"), false)
-                            }
-                            Err(e) => {
-                                self.set_status(format!("ssh · {label} · save failed: {e:#}"), true)
-                            }
-                        }
-                    }
-                    self.ui.session_password_profile_id = None;
                 } else {
-                    self.ui.session_opening = Some(SessionOpening {
-                        label: label.clone(),
-                        started: Instant::now(),
-                        clean_sent: false,
-                        clean_at: None,
-                        clear_written: false,
-                        nudge_sent: false,
-                        last_bytes: 0,
-                        quiet_since: None,
-                    });
+                    self.begin_session_opening(label.clone());
                     self.ui.session_password_profile_id = None;
-                    self.set_status(format!("ssh · {label}"), false);
+                    if remember {
+                        if let Some(pw) = password {
+                            match ide_sessions::set_password(&profile_id, &pw) {
+                                Ok(()) => self
+                                    .set_status(format!("ssh · {label} · password saved"), false),
+                                Err(e) => self.set_status(
+                                    format!("ssh · {label} · save failed: {e:#}"),
+                                    true,
+                                ),
+                            }
+                        } else {
+                            self.set_status(format!("ssh · {label}"), false);
+                        }
+                    } else {
+                        self.set_status(format!("ssh · {label}"), false);
+                    }
                 }
             }
             Ok(ConnectOutcome::RdpSpawned { label }) => {
@@ -602,6 +584,28 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    /// Start opening gate and discard motd immediately (wipes anything already painted).
+    fn begin_session_opening(&mut self, label: String) {
+        if let Some(pane) = self.sessions.active_ssh_pane() {
+            pane.begin_clean_open();
+        }
+        self.ui.session_opening = Some(SessionOpening {
+            label,
+            started: Instant::now(),
+            clean_sent: true,
+            clean_at: Some(Instant::now()),
+            clear_written: false,
+            nudge_sent: false,
+            rewipe_done: false,
+            last_bytes: self
+                .sessions
+                .active_ssh_pane()
+                .map(|p| p.bytes_read())
+                .unwrap_or(0),
+            quiet_since: None,
+        });
     }
 
     /// Key-dismiss: drop overlay with a local wipe only (no shell command injection).
@@ -624,7 +628,7 @@ impl App {
             return;
         };
 
-        // Discard from the first tick so fastfetch never enters the local VT.
+        // Belt-and-suspenders if opening was created without begin_session_opening.
         if !opening.clean_sent {
             pane.begin_clean_open();
             opening.clean_sent = true;
@@ -661,6 +665,22 @@ impl App {
                 .clean_at
                 .map(|t| t.elapsed())
                 .unwrap_or(Duration::ZERO);
+            // Banner leaked into the VT — one retry wipe, then hard local blank.
+            if rows > 4 && !opening.rewipe_done {
+                pane.begin_clean_open();
+                pane.finish_clean_open();
+                opening.rewipe_done = true;
+                opening.nudge_sent = false;
+                opening.clean_at = Some(now);
+                return;
+            }
+            if rows > 4 && opening.rewipe_done && since >= Duration::from_millis(150) {
+                // Still a banner: show a blank local screen rather than fastfetch.
+                pane.hard_reset_screen();
+                let _ = pane.write_bytes(b"\x0c");
+                self.ui.session_opening = None;
+                return;
+            }
             // Ctrl-L sometimes leaves a blank VT until the shell reprints the prompt.
             if rows == 0 && !opening.nudge_sent && since >= Duration::from_millis(200) {
                 let _ = pane.write_bytes(b"\r");
@@ -668,10 +688,13 @@ impl App {
                 opening.clean_at = Some(now);
                 return;
             }
-            // Reveal only once a prompt (or any text) is visible.
-            let has_prompt = rows >= 1 && since >= Duration::from_millis(80);
+            // Reveal only a prompt-sized screen (never a full fastfetch).
+            let has_prompt = (1..=3).contains(&rows) && since >= Duration::from_millis(80);
             let give_up = elapsed >= Duration::from_secs(4);
             if has_prompt || give_up {
+                if rows > 3 {
+                    pane.hard_reset_screen();
+                }
                 self.ui.session_opening = None;
             }
         }
