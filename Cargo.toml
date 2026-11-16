@@ -37,7 +37,7 @@ crossterm = { version = "0.28", features = ["event-stream"] }
 futures = "0.3"
 uuid = { version = "1", features = ["v4", "serde"] }
 clap = { version = "4.5", features = ["derive"] }
-dirs = "6"
+dirs = "7"
 unicode-width = "0.2"
 portable-pty = "0.8"
 vt100 = "0.15"
